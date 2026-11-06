@@ -42,7 +42,7 @@ class GeminiImage:
         text = r.text.lower()
         if r.status_code == 429:
             raise QuotaExhausted("gemini quota exhausted")
-        if r.status_code in (401, 403) or (r.status_code == 400 and ("billing" in text or "api key" in text)):
+        if r.status_code in (401, 402, 403) or (r.status_code == 400 and ("billing" in text or "api key" in text)):
             raise CreditExhausted(f"gemini {r.status_code}")
         if r.status_code >= 400:
             raise TransientProviderError(f"gemini {r.status_code}")

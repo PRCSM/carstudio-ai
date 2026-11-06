@@ -26,6 +26,14 @@ def test_valid_image_is_normalized(car_jpeg):
     assert "blur_variance" in p.quality
 
 
+def test_large_photos_are_downscaled_to_working_size():
+    big = np.random.default_rng(1).integers(0, 255, (3000, 4000, 3), dtype=np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(big).save(buf, "JPEG", quality=80)
+    p = prepare_image(buf.getvalue(), **LIMITS)
+    assert max(p.width, p.height) == 2048 and (p.width, p.height) == (2048, 1536)
+
+
 def test_extension_lies_are_rejected():
     with pytest.raises(ValidationFailed) as e:
         prepare_image(b"<html>not an image</html>", **LIMITS)

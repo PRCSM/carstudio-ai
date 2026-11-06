@@ -16,7 +16,7 @@ from app.providers.chain import ProviderChain, RedisCircuits, build_providers
 from app.services.storage import get_storage
 from app.services.vision import VisionClient
 from app.workers.celery_app import celery
-from app.workers.pipeline import RetryLater, run_job
+from app.workers.pipeline import RetryLater, _finish, run_job
 
 configure_logging()
 log = logging.getLogger(__name__)
@@ -43,10 +43,11 @@ def get_vision() -> VisionClient | None:
 
 @celery.task(bind=True, max_retries=OUTAGE_RETRIES, name="app.workers.tasks.process_job")
 def process_job(self, job_id: str):
-    lock = _redis.lock(f"lock:job:{job_id}", timeout=900, blocking=False)
+    # Lock TTL slightly above the task hard limit, so a killed worker's lock expires on its own.
+    lock = _redis.lock(f"lock:job:{job_id}", timeout=960, blocking=False)
     if not lock.acquire(blocking=False):
-        log.info("job %s already running elsewhere", job_id)
-        return
+        log.info("job %s is locked by another run; checking again later", job_id)
+        raise self.retry(countdown=120, max_retries=OUTAGE_RETRIES + 10)
     try:
         with session_scope() as db:
             status = run_job(db, uuid.UUID(job_id), settings=settings, storage=get_storage(),
@@ -97,11 +98,25 @@ def dispatch_outbox():
 
 @celery.task(name="app.workers.tasks.requeue_stuck")
 def requeue_stuck():
-    """Re-enqueue jobs left 'queued' (e.g. the broker was down when the API tried to enqueue)."""
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
+    """Re-enqueue jobs that were never picked up (broker down at enqueue time) or whose worker died
+    mid-run (OOM kill, redeploy). In-progress jobs are only touched after the run lock has expired."""
+    now = datetime.now(timezone.utc)
+    in_progress = ("validating", "analyzing", "preparing", "generating", "verifying")
     with session_scope() as db:
-        ids = db.scalars(select(GenerationJob.id).where(GenerationJob.status == "queued",
-                                                        GenerationJob.created_at < cutoff).limit(50)).all()
+        queued = db.scalars(select(GenerationJob.id).where(
+            GenerationJob.status == "queued", GenerationJob.created_at < now - timedelta(minutes=3)).limit(50)).all()
+        orphaned = db.scalars(select(GenerationJob.id).where(
+            GenerationJob.status.in_(in_progress),
+            GenerationJob.started_at < now - timedelta(minutes=17)).limit(50)).all()
+        ids = [i for i in [*queued, *orphaned] if not _redis.exists(f"lock:job:{i}")]
+        # give up on jobs that keep dying (e.g. repeatedly killed for memory) instead of looping forever
+        hopeless = db.scalars(select(GenerationJob).where(
+            GenerationJob.status.in_(in_progress), GenerationJob.started_at < now - timedelta(hours=2))).all()
+        for job in hopeless:
+            if not _redis.exists(f"lock:job:{job.id}"):
+                _finish(db, job, "failed", error_code="worker_lost",
+                        message="Something went wrong while processing your photo. Please try again.")
+                ids = [i for i in ids if i != job.id]
     for job_id in ids:
         process_job.delay(str(job_id))  # the per-job Redis lock prevents double processing
 

@@ -19,6 +19,8 @@ try:  # HEIC support is optional
 except ImportError:  # pragma: no cover
     HEIC_SUPPORTED = False
 
+MAX_WORKING_SIDE = 2048
+
 _SIGNATURES = {
     b"\xff\xd8\xff": "image/jpeg",
     b"\x89PNG\r\n\x1a\n": "image/png",
@@ -95,6 +97,8 @@ def prepare_image(data: bytes, *, max_bytes: int, max_pixels: int, min_side: int
                                code="image_too_small")
 
     rgb = img.convert("RGB")  # drops alpha and all metadata on re-encode
+    if max(rgb.size) > MAX_WORKING_SIDE:  # bounded working size keeps worker memory predictable
+        rgb.thumbnail((MAX_WORKING_SIDE, MAX_WORKING_SIDE), Image.Resampling.LANCZOS)
     out = io.BytesIO()
     rgb.save(out, format="JPEG", quality=92, optimize=True)
     return PreparedImage(

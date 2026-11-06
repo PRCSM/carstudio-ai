@@ -27,6 +27,20 @@ def test_composite_keeps_size_and_car_pixels(car_jpeg, style):
     assert 0.04 <= meta["coverage"] <= 0.60
 
 
+def test_composite_memory_is_bounded_for_huge_input(car_scene):
+    import tracemalloc
+
+    import cv2
+
+    huge = to_jpeg(cv2.resize(car_scene(), (4800, 3200), interpolation=cv2.INTER_CUBIC))
+    tracemalloc.start()
+    out, _ = composite(huge, "dark_luxury")
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert max(Image.open(io.BytesIO(out)).size) == 2048
+    assert peak < 350 * 1024 * 1024, f"peak {peak / 1e6:.0f} MB"
+
+
 def test_composite_rejects_unusable_segmentation():
     flat = to_jpeg(np.full((800, 1200, 3), 127, np.uint8))
     with pytest.raises(TransientProviderError):

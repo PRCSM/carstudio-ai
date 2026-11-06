@@ -70,11 +70,22 @@ def _main_object(fg: np.ndarray) -> np.ndarray:
     return filled
 
 
+SEGMENT_SIDE = 1024
+MAX_SIDE = 2048
+
+
 def segment_car(rgb: np.ndarray) -> tuple[np.ndarray, str]:
-    mask = _segment_rembg(rgb)
-    if mask is not None:
-        return mask, "rembg"
-    return _segment_grabcut(rgb), "grabcut"
+    """Segment on a ≤1024px copy (the model works at ~1024 internally anyway), then upscale the mask."""
+    h, w = rgb.shape[:2]
+    scale = SEGMENT_SIDE / max(h, w)
+    small = cv2.resize(rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1 else rgb
+    mask = _segment_rembg(small)
+    method = "rembg"
+    if mask is None:
+        mask, method = _segment_grabcut(small), "grabcut"
+    if mask.shape[:2] != (h, w):
+        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+    return mask, method
 
 
 def _background(style: str, w: int, h: int, horizon: int) -> np.ndarray:
@@ -89,9 +100,11 @@ def _background(style: str, w: int, h: int, horizon: int) -> np.ndarray:
     band = max(4, h // 12)
     lo, hi = max(0, horizon - band), min(h, horizon + band)
     bg[lo:hi] = cv2.GaussianBlur(bg[lo:hi], (0, 0), band / 2)
-    # gentle vignette
-    yy, xx = np.mgrid[0:h, 0:w]
-    d = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h * 0.45) / (h / 1.4)) ** 2)
+    # gentle vignette (open grids + float32 keep memory at ~1 image-sized buffer)
+    yy, xx = np.ogrid[0:h, 0:w]
+    dx = ((xx - w / 2) / (w / 2)).astype(np.float32)
+    dy = ((yy - h * 0.45) / (h / 1.4)).astype(np.float32)
+    d = np.sqrt(dx * dx + dy * dy)
     strength = 0.25 if style == "dark_luxury" else 0.08
     bg *= (1 - strength * np.clip(d, 0, 1.4) / 1.4)[..., None]
     return bg
@@ -100,7 +113,10 @@ def _background(style: str, w: int, h: int, horizon: int) -> np.ndarray:
 def composite(source_jpeg: bytes, style: str) -> tuple[bytes, dict]:
     if style not in STYLE_PALETTES:
         raise ValueError(style)
-    rgb = np.asarray(Image.open(io.BytesIO(source_jpeg)).convert("RGB"))
+    img = Image.open(io.BytesIO(source_jpeg)).convert("RGB")
+    if max(img.size) > MAX_SIDE:
+        img.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
+    rgb = np.asarray(img)
     h, w = rgb.shape[:2]
     mask, method = segment_car(rgb)
 

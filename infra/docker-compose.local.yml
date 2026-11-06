@@ -17,5 +17,5 @@ services:
     env_file: ../.env
     environment:
       REDIS_URL: redis://redis:6379/0
-    command: celery -A app.workers.celery_app worker -B --loglevel=INFO --concurrency=2
+    command: celery -A app.workers.celery_app worker -B --loglevel=INFO --concurrency=1 --max-memory-per-child=700000
     depends_on: [redis]
