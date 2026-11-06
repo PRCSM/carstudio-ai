@@ -126,3 +126,16 @@ def test_same_angle_still_uses_first_provider():
     chain = ProviderChain([Fake("composite", False), Fake("gemini", True)], MemoryCircuits(lambda: 0.0))
     req = EditRequest(image=b"x", prompt="p", style="s", width=1, height=1)
     assert chain.run(req, budget=Budget(), allow_training_providers=False).result.provider == "composite"
+
+
+# ---------- watermark message (pipeline imports the ORM, so this runs in CI) ----------
+def test_watermark_message_names_what_was_found():
+    pytest.importorskip("sqlalchemy")
+    from app.workers.pipeline import WATERMARK_MESSAGE, has_foreign_watermark, watermark_message
+
+    mark = {"type": "watermark_or_logo", "description": "Team-BHP watermark in the bottom-left corner."}
+    profile = {"overlays": [{"type": "screenshot_ui", "description": "lens button"}, mark]}
+    assert has_foreign_watermark(profile)
+    assert "Team-BHP watermark in the bottom-left corner)" in watermark_message(profile)
+    assert not has_foreign_watermark({"overlays": [{"type": "timestamp"}]})
+    assert watermark_message({"overlays": []}) == WATERMARK_MESSAGE

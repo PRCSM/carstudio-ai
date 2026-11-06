@@ -79,11 +79,16 @@ def create_upload(file: UploadFile = File(...), x_media_group: str | None = Head
 
 # ---------- jobs ----------
 def _enforce_quota(db: Session, p: Principal, s: Settings, new_jobs: int = 1) -> None:
+    from sqlalchemy import and_, not_
+
+    refused_free = and_(GenerationJob.status.in_(["needs_more_images", "cancelled"]),
+                        GenerationJob.attempt_count == 0)  # rejected before any generation: costs nothing
     today = db.scalar(select(func.count()).select_from(GenerationJob).where(
-        GenerationJob.customer_id == p.customer.id, GenerationJob.created_at >= utc_day_start()))
+        GenerationJob.customer_id == p.customer.id, GenerationJob.created_at >= utc_day_start(),
+        not_(refused_free)))
     limit = s.daily_customer_quota if p.kind == "service" else s.daily_anonymous_quota
     if today + new_jobs > limit:
-        raise QuotaExceeded("Daily limit reached. Please try again tomorrow.")
+        raise QuotaExceeded(f"Daily limit reached ({limit} images a day). Please try again tomorrow.")
     if p.kind == "web" and p.client_ip:
         import redis
 

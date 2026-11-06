@@ -77,13 +77,23 @@ def maybe_complete_set(db, set_id: uuid.UUID) -> str | None:
         return None
     done = sum(s == "completed" for s in statuses)
     review = sum(s == "review_required" for s in statuses)
+    retake = sum(s == "needs_more_images" for s in statuses)
     gset.status = "completed" if done == len(statuses) else ("partial" if done or review else "failed")
+    # Distinct customer-facing reasons, so the summary says *why* (e.g. a watermark), not a generic failure.
+    rows = db.execute(select(GenerationJob.error_code, GenerationJob.error_message)
+                      .where(GenerationJob.set_id == set_id,
+                             GenerationJob.status.in_(["needs_more_images", "failed"]))).all()
+    reasons: dict[str, dict] = {}
+    for code, message in rows:
+        r = reasons.setdefault(code or "unknown", {"code": code, "message": message, "count": 0})
+        r["count"] += 1
     gset.finished_at = datetime.now(timezone.utc)
     db.add(OutboxEvent(event_type=f"set.{gset.status}", payload={
         "set_id": str(gset.id), "status": gset.status, "mode": gset.mode, "style": gset.style,
         "channel": gset.channel, "reply_ref": gset.reply_ref, "customer_id": str(gset.customer_id),
-        "total": len(statuses), "completed": done, "review_required": review,
-        "failed": len(statuses) - done - review, "hide_plate": gset.hide_plate,
+        "total": len(statuses), "completed": done, "review_required": review, "needs_more_images": retake,
+        "failed": len(statuses) - done - review - retake, "hide_plate": gset.hide_plate,
+        "reasons": list(reasons.values()),
     }))
     db.commit()
     return gset.status
@@ -116,6 +126,16 @@ def is_temporary_outage(attempts: list[dict]) -> bool:
 def has_foreign_watermark(profile: dict | None) -> bool:
     return any(isinstance(o, dict) and o.get("type") == "watermark_or_logo"
                for o in (profile or {}).get("overlays") or [])
+
+
+def watermark_message(profile: dict | None) -> str:
+    found = next((o.get("description") for o in (profile or {}).get("overlays") or []
+                  if isinstance(o, dict) and o.get("type") == "watermark_or_logo" and o.get("description")), None)
+    if not found:
+        return WATERMARK_MESSAGE
+    found = found.strip().rstrip(".")[:120]
+    return (f"I spotted another website's watermark on this photo ({found}). "
+            "Please send the original photo from your own camera instead.")
 
 
 def apply_plate_blur(image: bytes, vision: VisionClient | None, budget: DbBudget, settings: Settings,
@@ -165,6 +185,16 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
 
     # 2. analyze (advisory)
     _advance(db, job, "analyzing")
+    if job.set_id is not None and job.vehicle_id is None:
+        sibling = db.scalar(select(GenerationJob).where(
+            GenerationJob.set_id == job.set_id, GenerationJob.source_upload_id == job.source_upload_id,
+            GenerationJob.vehicle_id.is_not(None), GenerationJob.id != job.id))
+        if sibling is not None:
+            if sibling.error_code in ("watermarked_source", "no_clear_car"):
+                _finish(db, job, "needs_more_images", error_code=sibling.error_code, message=sibling.error_message)
+                return job.status
+            job.vehicle_id = sibling.vehicle_id  # same photo, same answer: don't pay to analyse it again
+            db.commit()
     if vision and job.vehicle_id is None:  # skip on re-runs after an outage retry
         profile = vision.profile(source)
         DbBudget(db, settings.monthly_spend_limit_usd).record(
@@ -183,7 +213,8 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
                 return job.status
             if cleanup and has_foreign_watermark(profile):
                 # We don't strip other businesses' watermarks; ask for the customer's own original.
-                _finish(db, job, "needs_more_images", error_code="watermarked_source", message=WATERMARK_MESSAGE)
+                _finish(db, job, "needs_more_images", error_code="watermarked_source",
+                        message=watermark_message(profile))
                 return job.status
         db.commit()
 
