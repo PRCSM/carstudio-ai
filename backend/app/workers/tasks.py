@@ -87,6 +87,9 @@ def dispatch_outbox():
                 ts, sig = sign_payload(body, settings.n8n_callback_hmac_secret)
                 try:
                     r = client.post(settings.n8n_callback_url, content=body, headers={
+                        # n8n's Webhook node checks this with the same Header Auth credential it uses
+                        # to call the API; the HMAC headers allow stricter verification later.
+                        "Authorization": f"Bearer {settings.n8n_internal_api_token}",
                         "Content-Type": "application/json", "X-CarStudio-Timestamp": ts,
                         "X-CarStudio-Signature": sig, "X-CarStudio-Event-Id": str(ev.id)})
                     ok = r.status_code < 300
