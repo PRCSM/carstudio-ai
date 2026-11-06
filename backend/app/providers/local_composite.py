@@ -104,9 +104,16 @@ def composite(source_jpeg: bytes, style: str) -> tuple[bytes, dict]:
     h, w = rgb.shape[:2]
     mask, method = segment_car(rgb)
 
-    coverage = float((mask > 127).mean())
+    fg = mask > 127
+    coverage = float(fg.mean())
     if not 0.04 <= coverage <= 0.95:
         raise TransientProviderError(f"segmentation unusable (coverage={coverage:.2f})")
+    # A real object must look different from what surrounds it; segmenters will happily
+    # "find" a blob in a blank or uniform frame.
+    separation = float(np.abs(rgb[fg].astype(np.float32).mean(0) - rgb[~fg].astype(np.float32).mean(0)).max())
+    fg_texture = float(rgb[fg].astype(np.float32).std())
+    if separation < 8 and fg_texture < 8:
+        raise TransientProviderError(f"segmentation found no distinct object (separation={separation:.1f})")
 
     ys, xs = np.where(mask > 127)
     x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
