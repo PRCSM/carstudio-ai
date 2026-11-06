@@ -1,0 +1,21 @@
+# Local stack: API + worker + Redis. Uses your dev Supabase project for DB and storage.
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6379:6379"]
+
+  api:
+    build: ../backend
+    env_file: ../.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on: [redis]
+
+  worker:
+    build: ../backend
+    env_file: ../.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app worker -B --loglevel=INFO --concurrency=2
+    depends_on: [redis]
