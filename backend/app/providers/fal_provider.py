@@ -10,6 +10,7 @@ from app.providers.base import (CreditExhausted, EditRequest, EditResult, Policy
 class FalFluxKontext:
     name = "fal_flux_kontext"
     shares_data_for_training = False
+    supports_multi_reference = False
 
     def __init__(self, api_key: str, model: str, cost_usd: float, client: httpx.Client | None = None):
         self.api_key = api_key

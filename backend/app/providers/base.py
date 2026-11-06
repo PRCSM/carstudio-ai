@@ -35,6 +35,8 @@ class EditRequest:
     width: int
     height: int
     image_url: str | None = None  # short-lived signed URL, for providers that prefer URLs
+    extra_images: list[bytes] = field(default_factory=list)  # more reference photos (novel angles)
+    novel_view: bool = False  # output is a NEW viewpoint, so pixel-preserving providers can't serve it
 
 
 @dataclass
@@ -50,6 +52,7 @@ class ImageProvider(Protocol):
     name: str
     cost_per_call_usd: float
     shares_data_for_training: bool
+    supports_multi_reference: bool  # can use extra_images and draw new viewpoints (novel angles)
 
     def is_configured(self) -> bool: ...
 

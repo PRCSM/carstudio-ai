@@ -40,8 +40,9 @@ def edge_overlap(src: np.ndarray, out: np.ndarray) -> float:
     return float((a & b).sum() / a.sum())
 
 
-def technical_qa(source: bytes, output: bytes, *, pixel_preserving: bool = False,
+def technical_qa(source: bytes, output: bytes, *, pixel_preserving: bool = False, novel_view: bool = False,
                  retry_below: float = 0.35, review_below: float = 0.5) -> QaResult:
+    """novel_view: the output is a different camera angle, so outline and aspect checks don't apply."""
     try:
         out = _load(output)
     except Exception:
@@ -56,7 +57,7 @@ def technical_qa(source: bytes, output: bytes, *, pixel_preserving: bool = False
         reasons.append("output_too_small")
     ar_diff = abs(ow / oh - sw / sh) / (sw / sh)
     m["aspect_ratio_diff"] = round(ar_diff, 3)
-    if ar_diff > 0.15:
+    if ar_diff > 0.15 and not novel_view:
         reasons.append("aspect_ratio_changed")
 
     std = float(out.std())
@@ -64,7 +65,7 @@ def technical_qa(source: bytes, output: bytes, *, pixel_preserving: bool = False
     if std < 8:
         return QaResult("retry", ["blank_output"], m)
 
-    if not pixel_preserving:
+    if not pixel_preserving and not novel_view:
         resized = cv2.resize(out, (sw, sh)) if (ow, oh) != (sw, sh) else out
         overlap = edge_overlap(src, resized)
         m["edge_overlap"] = round(overlap, 3)
@@ -81,12 +82,14 @@ def technical_qa(source: bytes, output: bytes, *, pixel_preserving: bool = False
     return QaResult("approved", [], m)
 
 
-def merge_identity(tech: QaResult, identity: dict | None) -> QaResult:
+def merge_identity(tech: QaResult, identity: dict | None, *, require_clean: bool = False) -> QaResult:
     """Combine technical QA with the optional vision-model identity comparison."""
     if not identity or tech.decision in ("retry", "rejected"):
         return tech
     tech.metrics["identity"] = identity
     verdict = identity.get("verdict")
+    if require_clean and identity.get("leftover_overlays"):
+        return QaResult("retry", tech.reasons + ["overlays_left"], tech.metrics)
     if verdict == "different_vehicle":
         return QaResult("retry", tech.reasons + ["identity_mismatch"], tech.metrics)
     if verdict == "uncertain" or identity.get("condition_changed"):
@@ -98,4 +101,23 @@ def merge_identity(tech: QaResult, identity: dict | None) -> QaResult:
     if (verdict == "same_vehicle" and not identity.get("changed_features")
             and tech.decision == "review_required" and tech.reasons == ["geometry_uncertain"]):
         return QaResult("approved", ["geometry_confirmed_by_identity"], tech.metrics)
+    return tech
+
+
+def merge_angle_identity(tech: QaResult, identity: dict | None) -> QaResult:
+    """QA for AI-generated viewpoints. Stricter than same-angle edits: without a confirmed identity
+    check, a generated angle is never auto-approved."""
+    if tech.decision in ("retry", "rejected"):
+        return tech
+    if not identity:
+        return QaResult("review_required", tech.reasons + ["identity_unchecked"], tech.metrics)
+    tech.metrics["identity"] = identity
+    verdict = identity.get("verdict")
+    if verdict == "different_vehicle" or identity.get("viewpoint_matches") is False:
+        reason = "identity_mismatch" if verdict == "different_vehicle" else "wrong_viewpoint"
+        return QaResult("retry", tech.reasons + [reason], tech.metrics)
+    if identity.get("leftover_overlays"):
+        return QaResult("retry", tech.reasons + ["overlays_left"], tech.metrics)
+    if verdict == "uncertain" or identity.get("changed_features") or identity.get("invented_details"):
+        return QaResult("review_required", tech.reasons + ["identity_uncertain"], tech.metrics)
     return tech

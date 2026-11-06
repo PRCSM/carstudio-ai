@@ -169,6 +169,7 @@ class LocalComposite:
     name = "local_composite"
     cost_per_call_usd = 0.0
     shares_data_for_training = False
+    supports_multi_reference = False  # can only restage the real photo, not draw new angles
 
     def is_configured(self) -> bool:
         return True

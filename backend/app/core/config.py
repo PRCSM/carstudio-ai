@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     styles: str = "white_studio,dark_luxury,showroom"
     provider_circuit_seconds: int = 300
 
+    # Feature switches. All off = the v0.1 behaviour (single photo, same angle, no extras).
+    feature_sets: bool = False            # albums / multi-photo sets
+    feature_novel_angles: bool = False    # AI-generated extra angles (labelled visualizations)
+    feature_plate_blur: bool = False      # optional number-plate blur
+    feature_overlay_cleanup: bool = False  # remove screenshot UI / timestamps / stickers; reject watermarks
+    max_set_photos: int = 6
+    max_angle_references: int = 3
+    angle_targets: str = "front,front_three_quarter_left,left_side,rear_three_quarter_left,rear,right_side"
+
     cors_origins: list[str] = Field(default_factory=list)
 
     @property
@@ -66,6 +75,10 @@ class Settings(BaseSettings):
     @property
     def style_list(self) -> list[str]:
         return [s.strip() for s in self.styles.split(",") if s.strip()]
+
+    @property
+    def angle_target_list(self) -> list[str]:
+        return [a.strip() for a in self.angle_targets.split(",") if a.strip()]
 
     @property
     def free_tier_consents(self) -> set[str]:

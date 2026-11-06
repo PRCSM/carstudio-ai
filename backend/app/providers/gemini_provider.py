@@ -19,6 +19,7 @@ class GeminiImage:
         self.api_key = api_key
         self.model = model
         self.endpoint = endpoint
+        self.supports_multi_reference = True
         self.cost_per_call_usd = cost_usd
         self.shares_data_for_training = free_tier
         self.client = client or httpx.Client(timeout=httpx.Timeout(180, connect=10))
@@ -30,7 +31,8 @@ class GeminiImage:
         body = {
             "contents": [{"role": "user", "parts": [
                 {"text": req.prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(req.image).decode()}},
+                *[{"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}}
+                  for img in (req.image, *req.extra_images)],
             ]}],
             "generationConfig": {"responseModalities": ["IMAGE"]},
         }

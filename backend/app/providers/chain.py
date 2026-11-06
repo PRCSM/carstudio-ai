@@ -68,7 +68,7 @@ class ProviderChain:
     def run(self, req: EditRequest, *, budget: Budget, allow_training_providers: bool) -> ChainOutcome:
         attempts: list[dict] = []
         for p in self.providers:
-            skip = self._skip_reason(p, budget, allow_training_providers)
+            skip = self._skip_reason(p, budget, allow_training_providers, bool(req.extra_images) or req.novel_view)
             if skip:
                 attempts.append({"provider": p.name, "skipped": skip})
                 continue
@@ -94,9 +94,12 @@ class ProviderChain:
             return ChainOutcome(result=result, attempts=attempts)
         raise AllProvidersFailed(attempts)
 
-    def _skip_reason(self, p: ImageProvider, budget: Budget, allow_training: bool) -> str | None:
+    def _skip_reason(self, p: ImageProvider, budget: Budget, allow_training: bool,
+                     needs_multi_reference: bool = False) -> str | None:
         if not p.is_configured():
             return "not_configured"
+        if needs_multi_reference and not getattr(p, "supports_multi_reference", False):
+            return "single_image_only"
         if self.circuits.is_open(p.name):
             return "circuit_open"
         if p.shares_data_for_training and not allow_training:

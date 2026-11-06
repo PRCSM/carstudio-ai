@@ -2,8 +2,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, Numeric, Text, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, Text, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -86,7 +86,35 @@ class Upload(Base):
     height: Mapped[int] = mapped_column(Integer)
     byte_size: Mapped[int] = mapped_column(Integer)
     quality: Mapped[dict | None] = mapped_column(JSONB)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photo_groups.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = _now()
+
+
+class PhotoGroup(Base):
+    """A Telegram album (or a single photo) uploaded together."""
+    __tablename__ = "photo_groups"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"))
+    external_ref: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = _now()
+
+
+class GenerationSet(Base):
+    """One customer request that fans out into several jobs (album edit, or generated angles)."""
+    __tablename__ = "generation_sets"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"))
+    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photo_groups.id", ondelete="SET NULL"))
+    channel: Mapped[str] = mapped_column(Channel)
+    mode: Mapped[str] = mapped_column(Text)            # enhance | angles
+    style: Mapped[str] = mapped_column(Text)
+    hide_plate: Mapped[bool] = mapped_column(Boolean, default=False)
+    reply_ref: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="processing")
+    total_jobs: Mapped[int] = mapped_column(Integer, default=0)
+    idempotency_key: Mapped[str] = mapped_column(Text, unique=True)
+    created_at: Mapped[datetime] = _now()
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GenerationJob(Base):
@@ -104,6 +132,10 @@ class GenerationJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(Text, unique=True)
     reply_ref: Mapped[str | None] = mapped_column(Text)  # delivery address (Telegram chat id)
+    set_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("generation_sets.id", ondelete="CASCADE"))
+    target_angle: Mapped[str | None] = mapped_column(Text)
+    hide_plate: Mapped[bool] = mapped_column(Boolean, default=False)
+    reference_upload_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(UUID(as_uuid=True)))
     created_at: Mapped[datetime] = _now()
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
