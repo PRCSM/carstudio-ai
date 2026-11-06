@@ -30,25 +30,38 @@ PROFILE_VERSION = "profile_v1"
 
 class VisionClient:
     def __init__(self, api_key: str, model: str, endpoint: str = API, client: httpx.Client | None = None):
+        """`model` may be a comma-separated list; models that return 404 (retired / not offered on
+        this endpoint) are skipped and the first working one is remembered."""
         self.api_key = api_key
-        self.model = model
+        self.models = [m.strip() for m in model.split(",") if m.strip()]
         self.endpoint = endpoint
         self.client = client or httpx.Client(timeout=60)
+
+    @property
+    def model(self) -> str | None:
+        return self.models[0] if self.models else None
 
     def _call(self, prompt: str, images: list[bytes]) -> dict | None:
         parts = [{"text": prompt}] + [
             {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(i).decode()}} for i in images]
-        try:
-            r = self.client.post(self.endpoint.format(model=self.model), headers={"x-goog-api-key": self.api_key},
-                                 json={"contents": [{"role": "user", "parts": parts}],
-                                       "generationConfig": {"responseMimeType": "application/json",
-                                                            "temperature": 0}})
-            r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text)
-        except Exception as e:  # vision is advisory; never fail the job on it
-            log.warning("vision call failed: %s", type(e).__name__)
-            return None
+        body = {"contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
+        while self.models:
+            try:
+                r = self.client.post(self.endpoint.format(model=self.models[0]),
+                                     headers={"x-goog-api-key": self.api_key}, json=body)
+                if r.status_code == 404:
+                    log.warning("vision model %s not available; trying next", self.models[0])
+                    self.models.pop(0)
+                    continue
+                r.raise_for_status()
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text)
+            except Exception as e:  # vision is advisory; never fail the job on it
+                log.warning("vision call failed: %s", type(e).__name__)
+                return None
+        log.error("no configured vision model is available")
+        return None
 
     def profile(self, image: bytes) -> dict | None:
         return self._call(PROFILE_PROMPT, [image])
