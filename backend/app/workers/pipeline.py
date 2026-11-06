@@ -40,14 +40,21 @@ def _finish(db, job: GenerationJob, status: str, *, error_code: str | None = Non
             transition(db, job, "verifying")
     transition(db, job, status, error_code or message)
     job.error_code, job.error_message = error_code, message
-    db.add(OutboxEvent(event_type=f"job.{status}", payload={
-        "job_id": str(job.id), "status": status, "channel": job.channel,
-        "customer_id": str(job.customer_id), "error_code": error_code, "message": message,
-        "has_result": result_key is not None,
-    }))
-    if job.channel == "whatsapp":
+    db.add(OutboxEvent(event_type=f"job.{status}", payload=event_payload(
+        job, status, error_code=error_code, message=message,
+        has_result=status == "completed" and result_key is not None)))
+    if job.channel in ("whatsapp", "telegram"):
         db.add(DeliveryEvent(job_id=job.id, channel=job.channel))
     db.commit()
+
+
+def event_payload(job: GenerationJob, status: str, *, error_code=None, message=None, has_result=False,
+                  **extra) -> dict:
+    """Completion event for n8n. reply_ref tells it which chat to answer; no image URLs are included
+    (n8n fetches a fresh short-lived link from /v1/jobs/{id}/results)."""
+    return {"job_id": str(job.id), "status": status, "channel": job.channel, "style": job.style,
+            "customer_id": str(job.customer_id), "reply_ref": job.reply_ref, "error_code": error_code,
+            "message": message, "has_result": has_result, **extra}
 
 
 def allow_training_providers(settings: Settings, consent_version: str | None) -> bool:

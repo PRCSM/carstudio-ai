@@ -11,7 +11,7 @@ def _enum(name: str, *values: str) -> Enum:
     return Enum(*values, name=name, create_type=False)
 
 
-Channel = _enum("channel_t", "whatsapp", "web")
+Channel = _enum("channel_t", "whatsapp", "web", "telegram")
 JobStatus = _enum("job_status_t", "queued", "validating", "analyzing", "preparing", "generating",
                   "verifying", "completed", "failed", "cancelled", "review_required", "needs_more_images")
 QaStatus = _enum("qa_status_t", "pending", "approved", "retry", "review_required", "rejected")
@@ -103,6 +103,7 @@ class GenerationJob(Base):
     error_code: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(Text, unique=True)
+    reply_ref: Mapped[str | None] = mapped_column(Text)  # delivery address (Telegram chat id)
     created_at: Mapped[datetime] = _now()
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

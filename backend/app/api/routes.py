@@ -93,7 +93,7 @@ def create_job(body: JobCreate, idempotency_key: str = Header(..., min_length=8,
         customer.consent_at = datetime.now(timezone.utc)
 
     job = GenerationJob(customer_id=p.customer.id, source_upload_id=upload.id, channel=p.customer.channel,
-                        style=body.style, mode=body.mode, idempotency_key=scoped_key)
+                        style=body.style, mode=body.mode, idempotency_key=scoped_key, reply_ref=p.reply_ref)
     db.add(job)
     db.commit()
 
@@ -115,6 +115,15 @@ def get_job(job_id: uuid.UUID, p: Principal = Depends(get_principal), db: Sessio
     return JobOut(job_id=job.id, status=job.status, style=job.style, mode=job.mode,
                   attempt_count=job.attempt_count, error_code=job.error_code, message=job.error_message,
                   created_at=job.created_at, finished_at=job.finished_at)
+
+
+@router.get("/v1/me/jobs/latest", response_model=JobOut)
+def latest_job(p: Principal = Depends(get_principal), db: Session = Depends(get_db)):
+    job = db.scalar(select(GenerationJob).where(GenerationJob.customer_id == p.customer.id)
+                    .order_by(GenerationJob.created_at.desc()))
+    if job is None:
+        raise NotFound("No jobs yet.")
+    return get_job(job.id, p, db)
 
 
 @router.get("/v1/jobs/{job_id}/results", response_model=JobResults)
@@ -199,10 +208,13 @@ def review_decide(job_id: uuid.UUID, body: ReviewDecision, db: Session = Depends
     transition(db, job, target, f"review:{body.decision}")
     db.add(ReviewAction(job_id=job.id, reviewer_id=body.reviewer_id, decision=body.decision,
                         reason=body.reason))
-    db.add(OutboxEvent(event_type=f"job.{target}", payload={
-        "job_id": str(job.id), "status": target, "channel": job.channel, "customer_id": str(job.customer_id),
-        "has_result": target == "completed", "reviewed": True}))
-    if job.channel == "whatsapp":
+    from app.workers.pipeline import event_payload
+
+    messages = {"failed": "We couldn't produce a faithful studio image from this photo. Please try a clearer one.",
+                "needs_more_images": "Please send a clearer photo showing the whole car."}
+    db.add(OutboxEvent(event_type=f"job.{target}", payload=event_payload(
+        job, target, message=messages.get(target), has_result=target == "completed", reviewed=True)))
+    if job.channel in ("whatsapp", "telegram"):
         db.add(DeliveryEvent(job_id=job.id, channel=job.channel))
     db.commit()
     return {"job_id": str(job.id), "status": job.status}

@@ -14,11 +14,15 @@ from app.db.models import Customer
 from app.db.session import get_db
 
 
+SERVICE_CHANNELS = {"whatsapp", "telegram"}
+
+
 @dataclass
 class Principal:
     kind: str            # "service" | "web"
     customer: Customer
     client_ip: str | None
+    reply_ref: str | None = None  # where results are delivered (Telegram chat id)
 
 
 def _client_ip(request: Request) -> str | None:
@@ -46,6 +50,7 @@ def get_principal(
     authorization: str | None = Header(default=None),
     x_customer_ref: str | None = Header(default=None),
     x_client_session: str | None = Header(default=None),
+    x_channel: str = Header(default="whatsapp"),
     db: Session = Depends(get_db),
     s: Settings = Depends(get_settings),
 ) -> Principal:
@@ -55,8 +60,13 @@ def get_principal(
             raise Unauthorized("Invalid service token.")
         if not x_customer_ref:
             raise ValidationFailed("X-Customer-Ref header is required.", code="missing_customer")
-        customer = _get_or_create_customer(db, "whatsapp", hash_external_ref(x_customer_ref, s.customer_hash_salt))
-        return Principal("service", customer, None)
+        channel = x_channel.strip().lower()
+        if channel not in SERVICE_CHANNELS:
+            raise ValidationFailed("X-Channel must be whatsapp or telegram.", code="invalid_channel")
+        customer = _get_or_create_customer(db, channel, hash_external_ref(x_customer_ref, s.customer_hash_salt))
+        # Telegram chat ids are needed to deliver results; phone numbers are never stored.
+        reply_ref = x_customer_ref.strip() if channel == "telegram" else None
+        return Principal("service", customer, None, reply_ref)
 
     if not x_client_session or not 16 <= len(x_client_session) <= 64:
         raise Unauthorized("Missing client session.")
