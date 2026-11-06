@@ -89,6 +89,18 @@ def test_identity_merge():
     assert qa.merge_identity(qa.QaResult("approved", [], {}), None).decision == "approved"
 
 
+def test_identity_confirmation_resolves_borderline_geometry_only():
+    same = {"verdict": "same_vehicle", "changed_features": [], "condition_changed": False}
+    borderline = qa.QaResult("review_required", ["geometry_uncertain"], {"edge_overlap": 0.42})
+    assert qa.merge_identity(borderline, same).decision == "approved"
+    # identity doubts still go to a human
+    changed = {**same, "changed_features": ["wheels"]}
+    assert qa.merge_identity(qa.QaResult("review_required", ["geometry_uncertain"], {}), changed).decision \
+        == "review_required"
+    # a clearly broken outline is never rescued
+    assert qa.merge_identity(qa.QaResult("retry", ["geometry_changed"], {}), same).decision == "retry"
+
+
 def test_prompts_only_accept_known_styles():
     assert "infinity-cove" in same_angle_prompt("white_studio")
     with pytest.raises(UnknownStyle):

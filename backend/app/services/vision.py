@@ -16,14 +16,16 @@ PROFILE_PROMPT = """Analyze this photo for an automotive studio-edit pipeline. R
  "front_three_quarter"|"rear_three_quarter"|"other", "visible_features": [str],
  "visible_damage": [str], "unknown_features": [str], "confidence": "high"|"medium"|"low",
  "retake_reason": str|null}
-Use null for anything you are not confident about. Do not guess hidden details."""
+Use null for anything you are not confident about. Do not guess hidden details.
+Never transcribe license-plate text or any personal information."""
 
 COMPARE_PROMPT = """Image 1 is the original car photo; image 2 is a studio edit of it.
 Compare only the vehicle. Return JSON only:
 {"verdict": "same_vehicle"|"different_vehicle"|"uncertain",
  "changed_features": [str], "condition_changed": bool, "notes": str}
 Flag changes to body shape, paint color, wheels, grille, lamps, badges, trim, accessories,
-added/removed damage, or plate content. Lighting and background changes are expected."""
+added/removed damage, or plate content. Lighting and background changes are expected.
+Never transcribe license-plate text or any personal information in your answer."""
 
 PROFILE_VERSION = "profile_v1"
 

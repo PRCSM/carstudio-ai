@@ -93,4 +93,9 @@ def merge_identity(tech: QaResult, identity: dict | None) -> QaResult:
         reasons = tech.reasons + (["condition_changed"] if identity.get("condition_changed") else
                                   ["identity_uncertain"])
         return QaResult("review_required", reasons, tech.metrics)
+    # A borderline outline score (background edges vanish by design, especially on dark sets) is
+    # resolved when the identity check confirms the same vehicle with nothing changed.
+    if (verdict == "same_vehicle" and not identity.get("changed_features")
+            and tech.decision == "review_required" and tech.reasons == ["geometry_uncertain"]):
+        return QaResult("approved", ["geometry_confirmed_by_identity"], tech.metrics)
     return tech
