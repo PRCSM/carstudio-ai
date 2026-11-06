@@ -121,6 +121,38 @@ const sendSetPhoto = node({
   },
 });
 
+// Telegram recompresses photos (~1280px). After each preview, send the full-resolution JPEG as a file.
+const downloadSetFile = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.5,
+  config: {
+    name: 'Download full-quality file',
+    parameters: { method: 'GET', url: expr(`{{ $('Has an image').item.json.url }}`),
+                  options: { timeout: 60000, response: { response: { responseFormat: 'file', outputPropertyName: 'data' } } } },
+    retryOnFail: true, maxTries: 3, waitBetweenTries: 2000, onError: 'continueRegularOutput',
+  },
+});
+
+const sendSetFile = node({
+  type: 'n8n-nodes-base.telegram',
+  version: 1.2,
+  config: {
+    name: 'Send full-quality file',
+    parameters: {
+      resource: 'message', operation: 'sendDocument',
+      chatId: expr(`{{ $('Job events from API').first().json.body.data.reply_ref }}`),
+      binaryData: true, binaryPropertyName: 'data',
+      additionalFields: {
+        fileName: expr(`carstudio-{{ $('Has an image').item.json.angle || ('photo-' + ($itemIndex + 1)) }}.jpg`),
+        caption: expr(`📎 Full quality: {{ { front: 'Front', front_three_quarter_left: 'Front ¾ · left', front_three_quarter_right: 'Front ¾ · right', left_side: 'Left side', right_side: 'Right side', rear_three_quarter_left: 'Rear ¾ · left', rear_three_quarter_right: 'Rear ¾ · right', rear: 'Rear' }[$('Has an image').item.json.angle] || ('Photo ' + ($itemIndex + 1)) }}`),
+        parse_mode: 'HTML', disable_notification: true,
+      },
+    },
+    credentials: tgCred,
+    retryOnFail: true, maxTries: 3, waitBetweenTries: 3000, onError: 'continueRegularOutput',
+  },
+});
+
 const setSummary = node({
   type: 'n8n-nodes-base.telegram',
   version: 1.2,
@@ -214,6 +246,36 @@ const sendPhoto = node({
   },
 });
 
+const downloadPhotoFile = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.5,
+  config: {
+    name: 'Download full-quality photo',
+    parameters: { method: 'GET', url: expr(`{{ $('Get result link').item.json.images[0].url }}`),
+                  options: { timeout: 60000, response: { response: { responseFormat: 'file', outputPropertyName: 'data' } } } },
+    retryOnFail: true, maxTries: 3, waitBetweenTries: 2000, onError: 'continueRegularOutput',
+  },
+});
+
+const sendPhotoFile = node({
+  type: 'n8n-nodes-base.telegram',
+  version: 1.2,
+  config: {
+    name: 'Send full-quality photo file',
+    parameters: {
+      resource: 'message', operation: 'sendDocument',
+      chatId: expr(`{{ $('Job events from API').item.json.body.data.reply_ref }}`),
+      binaryData: true, binaryPropertyName: 'data',
+      additionalFields: {
+        fileName: expr(`carstudio-{{ $('Job events from API').item.json.body.data.style }}.jpg`),
+        caption: '📎 Full-quality file (no Telegram compression)', disable_notification: true,
+      },
+    },
+    credentials: tgCred,
+    retryOnFail: true, maxTries: 3, waitBetweenTries: 3000, onError: 'continueRegularOutput',
+  },
+});
+
 const sendUpdate = node({
   type: 'n8n-nodes-base.telegram',
   version: 1.2,
@@ -231,15 +293,15 @@ const sendUpdate = node({
 });
 
 const note = sticky(`## CarStudio AI · Job events → Telegram v2
-**set.*** events → fetch the set → send each image (labelled by angle) → one summary.
+**set.*** events → fetch the set → send each image (preview + full-quality file) → one summary.
 **job.*** events → same as v1 (single photo or status update).
 Active when Railway's N8N_CALLBACK_URL points at /webhook/carstudio-job-events-v2.`, [], { width: 440, height: 200 });
 
 export default workflow('carstudio-job-events-v2', 'CarStudio · Job events → Telegram v2')
   .add(events)
   .to(isTelegram.onTrue(isSet
-    .onTrue(getSet.to(anyReady.onTrue(splitItems.to(hasImage.to(sendSetPhoto.to(setSummary)))).onFalse(failSummary)))
-    .onFalse(hasResult.onTrue(getResult.to(sendPhoto)).onFalse(sendUpdate))))
+    .onTrue(getSet.to(anyReady.onTrue(splitItems.to(hasImage.to(sendSetPhoto.to(downloadSetFile.to(sendSetFile.to(setSummary)))))).onFalse(failSummary)))
+    .onFalse(hasResult.onTrue(getResult.to(sendPhoto.to(downloadPhotoFile.to(sendPhotoFile)))).onFalse(sendUpdate))))
   .add(note)
-  .group('Deliver a set', [getSet, anyReady, splitItems, hasImage, sendSetPhoto, setSummary, failSummary], { description: 'Sends every finished image of an album or angle set, then one summary message' })
-  .group('Deliver a single photo', [hasResult, getResult, sendPhoto, sendUpdate], { description: 'Sends one finished studio photo, or a short update when a retake or review is needed' });
+  .group('Deliver a set', [getSet, anyReady, splitItems, hasImage, sendSetPhoto, downloadSetFile, sendSetFile, setSummary, failSummary], { description: 'Sends every finished image of an album or angle set, then one summary message' })
+  .group('Deliver a single photo', [hasResult, getResult, sendPhoto, downloadPhotoFile, sendPhotoFile, sendUpdate], { description: 'Sends one finished studio photo, or a short update when a retake or review is needed' });
