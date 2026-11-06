@@ -12,6 +12,8 @@ Known-good version: **v0.1** (single photo, Telegram bot v1). Git branch `stable
 | `FEATURE_OVERLAY_CLEANUP` | Removes screenshot buttons / timestamps / stickers |
 | `WATERMARK_POLICY` | `ask_original` (default): refuse photos with another site's watermark. `remove`: erase it (currently set for private testing; switch back before any public use) |
 | `COMPOSITE_FALLBACK` | When every AI attempt fails QA, deliver the pixel-preserving local composite instead of failing |
+| `GEMINI_IMAGE_MODEL` / `IMAGE_OUTPUT_SIZE` | Image model list (best first) and output resolution. Back to the old 1K behaviour: `gemini-2.5-flash-image` |
+| `DETAIL_TRANSFER` | Restore the real photo's fine detail onto same-angle AI outputs; `false` turns it off with no other change |
 
 ## Switch to v2
 

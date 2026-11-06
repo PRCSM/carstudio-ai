@@ -113,6 +113,7 @@ def build_providers(settings) -> list[ImageProvider]:
     from app.providers.local_composite import LocalComposite
 
     registry = {}
+    prices = {"pro-image": settings.price_gemini_pro, "3.1-flash-image": settings.price_gemini_flash3}
 
     def fal():
         from app.providers.fal_provider import FalFluxKontext
@@ -122,18 +123,20 @@ def build_providers(settings) -> list[ImageProvider]:
         from app.providers.gemini_provider import GeminiImage
         return GeminiImage(name="gemini_paid", api_key=settings.gemini_paid_api_key,
                            model=settings.gemini_image_model, cost_usd=settings.price_gemini_paid,
-                           free_tier=False)
+                           free_tier=False, image_size=settings.image_output_size, model_prices=prices)
 
     def gemini_free():
         from app.providers.gemini_provider import GeminiImage
         return GeminiImage(name="gemini_free", api_key=settings.gemini_free_api_key,
-                           model=settings.gemini_image_model, cost_usd=0.0, free_tier=True)
+                           model=settings.gemini_image_model, cost_usd=0.0, free_tier=True,
+                           image_size=settings.image_output_size)
 
     def vertex_gemini():
         from app.providers.gemini_provider import VERTEX_API, GeminiImage
         return GeminiImage(name="vertex_gemini", api_key=settings.vertex_api_key,
                            model=settings.gemini_image_model, cost_usd=settings.price_gemini_paid,
-                           free_tier=False, endpoint=VERTEX_API)
+                           free_tier=False, endpoint=VERTEX_API, image_size=settings.image_output_size,
+                           model_prices=prices)
 
     registry.update(fal_flux_kontext=fal, vertex_gemini=vertex_gemini, gemini_paid=gemini_paid,
                     gemini_free=gemini_free, local_composite=LocalComposite)

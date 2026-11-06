@@ -51,6 +51,16 @@ def blur_plates(jpeg: bytes, boxes: list[list[int]]) -> tuple[bytes, int]:
     blurred = cv2.GaussianBlur(blurred, (0, 0), strength)
     feather = cv2.GaussianBlur(mask, (0, 0), max(2.0, strength * 0.15))[..., None]
     out = img * (1 - feather) + blurred * feather
-    buf = io.BytesIO()
-    Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(buf, format="JPEG", quality=93)
-    return buf.getvalue(), count
+    from app.services.detail import encode_jpeg
+    return encode_jpeg(np.clip(out, 0, 255).astype(np.uint8)), count
+
+
+def mirrored_boxes(boxes: list[list[int]], axis_y: float) -> list[list[int]]:
+    """Boxes reflected across a horizontal floor line (0-1000 scale): where a plate shows in a floor
+    reflection. Only plates near the floor line (on the car, not far up the frame) are mirrored."""
+    out = []
+    for ymin, xmin, ymax, xmax in boxes:
+        if ymax > axis_y or axis_y - ymin > 400:
+            continue
+        out.append([int(2 * axis_y - ymax), xmin, int(2 * axis_y - ymin), xmax])
+    return out

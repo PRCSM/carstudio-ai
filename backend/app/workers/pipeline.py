@@ -20,7 +20,7 @@ from app.providers.chain import AllProvidersFailed, ProviderChain
 from app.services import qa as qa_mod
 from app.services.budget import DbBudget
 from app.services.job_state import TERMINAL_STATUSES, can_transition, transition
-from app.services.plate import blur_plates
+from app.services.plate import blur_plates, mirrored_boxes
 from app.services.prompts import (PROMPT_VERSION, PROMPT_VERSION_ANGLE, PROMPT_VERSION_CLEAN,
                                   PROMPT_VERSION_RELIGHT, novel_angle_prompt, relight_prompt, same_angle_prompt)
 from app.services.vision import PROFILE_VERSION, VisionClient
@@ -149,7 +149,9 @@ def watermark_message(profile: dict | None) -> str:
 
 
 def apply_plate_blur(image: bytes, vision: VisionClient | None, budget: DbBudget, settings: Settings,
-                     job: GenerationJob) -> tuple[bytes, dict]:
+                     job: GenerationJob, mirror_axis_y: float | None = None) -> tuple[bytes, dict]:
+    """mirror_axis_y (0-1000): floor line of a reflection we drew ourselves, so the mirrored plate is
+    blurred too even if the vision model misses the faint upside-down copy."""
     if vision is None:
         return image, {"plate_blur": "unavailable"}
     boxes = vision.locate_plates(image)
@@ -157,8 +159,26 @@ def apply_plate_blur(image: bytes, vision: VisionClient | None, budget: DbBudget
                   job_id=job.id, customer_id=job.customer_id)
     if not boxes:
         return image, {"plate_blur": "no_plate_found" if boxes == [] else "locate_failed"}
+    if mirror_axis_y is not None:
+        boxes = boxes + mirrored_boxes(boxes, mirror_axis_y)
     blurred, n = blur_plates(image, boxes)
     return blurred, {"plate_blur": "applied" if n else "no_valid_box", "plates_blurred": n}
+
+
+def restore_detail(source: bytes, image: bytes, settings: Settings, profile: dict | None) -> tuple[bytes, dict]:
+    """Detail-preserving re-composite (see services/detail.py). Skipped when the source had overlays
+    (a watermark or caption over the car would be copied back)."""
+    from app.services.detail import enhance_detail, ensure_jpeg
+
+    if not settings.detail_transfer:
+        return ensure_jpeg(image), {"detail": "disabled"}
+    if (profile or {}).get("overlays"):
+        return ensure_jpeg(image), {"detail": "skipped", "reason": "overlays_in_source"}
+    try:
+        return enhance_detail(source, image, strength=settings.detail_strength)
+    except Exception as e:  # never lose a good result over an enhancement step
+        log.warning("detail transfer failed: %s", e)
+        return ensure_jpeg(image), {"detail": "error", "reason": type(e).__name__}
 
 
 def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: ProviderChain,
@@ -241,6 +261,7 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
     else:
         prompt, prompt_version = same_angle_prompt(job.style), PROMPT_VERSION
     model_input, input_url = source, signed
+    mirror_axis = None
     if (not novel and cleanup and settings.watermark_policy == "remove"
             and has_foreign_watermark(_profile_of(db, job))):
         # The image model refuses requests to remove watermarks, and we don't disguise such requests.
@@ -248,7 +269,8 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         # background goes with it), and the model is only asked to polish the lighting of that image.
         staged = _stage_on_studio(source, job.style)
         if staged is not None:
-            model_input, input_url = staged, None
+            (model_input, staged_meta), input_url = staged, None
+            mirror_axis = staged_meta.get("mirror_axis_y")
             prompt, prompt_version = relight_prompt(job.style), PROMPT_VERSION_RELIGHT
     req = EditRequest(image=model_input, prompt=prompt, style=job.style, width=upload.width, height=upload.height,
                       image_url=input_url, extra_images=references[1:], novel_view=novel)
@@ -305,9 +327,18 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
             result = qa_mod.merge_identity(result, identity, require_clean=cleanup)
 
         final_image, extra_meta = res.image, {}
-        if blur_plate and result.decision in ("approved", "review_required"):
-            # QA ran on the unblurred image, so a blurred plate never counts as an identity change.
-            final_image, extra_meta = apply_plate_blur(res.image, vision, budget, settings, job)
+        if result.decision in ("approved", "review_required"):
+            if not novel and not pixel_preserving:
+                final_image, detail_meta = restore_detail(source, final_image, settings, _profile_of(db, job))
+                extra_meta["detail"] = detail_meta
+            elif novel:
+                from app.services.detail import ensure_jpeg
+                final_image = ensure_jpeg(final_image)
+            if blur_plate:
+                # QA ran on the unblurred image, so a blurred plate never counts as an identity change.
+                axis = res.meta.get("mirror_axis_y") if pixel_preserving else mirror_axis
+                final_image, plate_meta = apply_plate_blur(final_image, vision, budget, settings, job, axis)
+                extra_meta.update(plate_meta)
         key = f"{job.customer_id}/{job.id}/attempt-{job.attempt_count}.jpg"
         storage.upload(settings.storage_outputs_bucket, key, final_image, "image/jpeg")
 
@@ -342,13 +373,12 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
     return job.status
 
 
-def _stage_on_studio(source: bytes, style: str) -> bytes | None:
+def _stage_on_studio(source: bytes, style: str) -> tuple[bytes, dict] | None:
     from app.providers.base import ProviderError
     from app.providers.local_composite import composite
 
     try:
-        image, _ = composite(source, style)
-        return image
+        return composite(source, style)
     except ProviderError as e:
         log.warning("could not stage watermarked photo on studio background: %s", e)
         return None
@@ -372,7 +402,7 @@ def _try_composite_fallback(db, job: GenerationJob, source: bytes, settings: Set
     final_image, extra_meta = res.image, {}
     if blur_plate:
         final_image, extra_meta = apply_plate_blur(res.image, vision, DbBudget(db, settings.monthly_spend_limit_usd),
-                                                   settings, job)
+                                                   settings, job, res.meta.get("mirror_axis_y"))
     job.attempt_count += 1
     key = f"{job.customer_id}/{job.id}/fallback.jpg"
     storage.upload(settings.storage_outputs_bucket, key, final_image, "image/jpeg")

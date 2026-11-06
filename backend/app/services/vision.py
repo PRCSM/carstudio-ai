@@ -45,8 +45,9 @@ references. Never transcribe license-plate text or any personal information."""
 
 PLATE_PROMPT = """Find every vehicle number plate (license plate) in this image. Return JSON only:
 {"plates": [{"box_2d": [ymin, xmin, ymax, xmax]}]}
-Coordinates are integers normalised to 0-1000. Return an empty list if no plate is visible.
-Do not transcribe the plate text."""
+Include plates that appear in reflections: a mirrored or upside-down plate in a glossy floor, a window or
+the car's paint counts as a separate plate. Coordinates are integers normalised to 0-1000. Return an
+empty list if no plate is visible. Do not transcribe the plate text."""
 
 PROFILE_VERSION = "profile_v2"
 

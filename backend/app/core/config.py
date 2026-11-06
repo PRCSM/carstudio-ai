@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     vertex_api_key: str = ""  # Google Cloud API key with Vertex AI enabled (uses GCP credits)
     gemini_paid_api_key: str = ""
     gemini_free_api_key: str = ""
-    gemini_image_model: str = "gemini-2.5-flash-image"  # verify current ID in AI Studio
+    # Comma list, best first; 404s fall through to the next. Gemini 3 Pro Image gives real 2K/4K output.
+    gemini_image_model: str = "gemini-3-pro-image-preview,gemini-3.1-flash-image-preview,gemini-2.5-flash-image"
+    image_output_size: str = "2K"  # imageConfig.imageSize for Gemini 3 image models: 1K | 2K | 4K
     gemini_vision_model: str = "gemini-2.5-flash"  # verify current ID in AI Studio
     vision_enabled: bool = True
     # Free-tier providers may use inputs for training; only allowed when the customer's
@@ -36,7 +38,9 @@ class Settings(BaseSettings):
 
     # Rough per-call prices (USD) used for budget accounting; keep in sync with provider pages.
     price_fal_flux_kontext: float = 0.04
-    price_gemini_paid: float = 0.039
+    price_gemini_paid: float = 0.039   # gemini-2.5-flash-image (1K)
+    price_gemini_pro: float = 0.134    # gemini-3-pro-image at 1K/2K (4K costs more)
+    price_gemini_flash3: float = 0.067  # gemini-3.1-flash-image at 1K/2K
     price_gemini_vision: float = 0.002
 
     n8n_internal_api_token: str = ""
@@ -67,6 +71,9 @@ class Settings(BaseSettings):
     watermark_policy: str = "ask_original"
     # Fall back to the pixel-preserving local composite when every AI attempt fails QA (same-angle only).
     composite_fallback: bool = False
+    # Move the customer's real fine detail back onto same-angle AI outputs (badges, grille, wheels).
+    detail_transfer: bool = True
+    detail_strength: float = 0.75
     max_set_photos: int = 6
     max_angle_references: int = 3
     angle_targets: str = "front,front_three_quarter_left,left_side,rear_three_quarter_left,rear,right_side"

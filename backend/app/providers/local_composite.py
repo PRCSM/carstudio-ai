@@ -139,7 +139,7 @@ def composite(source_jpeg: bytes, style: str) -> tuple[bytes, dict]:
     car_w, car_h = x1 - x0, y1 - y0
 
     bg = _background(style, w, h, horizon=int(y1 - car_h * 0.12))
-    alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), 1.2)[..., None]
+    alpha = matte(mask)[..., None]
 
     # contact shadow: a soft ellipse hugging the bottom of the car
     shadow = np.zeros((h, w), np.float32)
@@ -155,14 +155,43 @@ def composite(source_jpeg: bytes, style: str) -> tuple[bytes, dict]:
         flip_h = min(car_h, h - y1 - 1)
         if flip_h > 4:
             car = rgb[y1 - flip_h:y1][::-1].astype(np.float32)
+            car = cv2.GaussianBlur(car, (0, 0), 1.5)  # real floor reflections are slightly diffuse
             a = alpha[y1 - flip_h:y1][::-1] * np.linspace(reflect, 0, flip_h)[:, None, None]
             region = bg[y1:y1 + flip_h]
             bg[y1:y1 + flip_h] = region * (1 - a) + car * a
 
-    out = bg * (1 - alpha) + rgb.astype(np.float32) * alpha
-    buf = io.BytesIO()
-    Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(buf, format="JPEG", quality=93)
-    return buf.getvalue(), {"segmentation": method, "coverage": round(coverage, 3)}
+    out = bg * (1 - alpha) + decontaminate(rgb, alpha[..., 0]) * alpha
+    from app.services.detail import encode_jpeg
+    meta = {"segmentation": method, "coverage": round(coverage, 3), "size": [w, h]}
+    if reflect > 0:
+        # where the floor mirror sits (0-1000 of height), so plate blur can also hide the mirrored plate
+        meta["mirror_axis_y"] = round(float(y1) * 1000 / h, 1)
+    return encode_jpeg(np.clip(out, 0, 255).astype(np.uint8)), meta
+
+
+def matte(mask: np.ndarray) -> np.ndarray:
+    """Soft alpha that sits just inside the cut-out. Segmentation masks bleed 1-3 px into the old
+    background; feathering that bleed is what draws a bright halo around the car."""
+    h, w = mask.shape[:2]
+    k = max(1, round(max(h, w) / 900))  # ~2 px at 2K
+    tight = cv2.erode((mask > 127).astype(np.uint8) * 255, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+    return cv2.GaussianBlur(tight.astype(np.float32) / 255.0, (0, 0), 0.6 + 0.4 * k)
+
+
+def decontaminate(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """In the semi-transparent rim, replace colours with those of the nearest solid car pixels so the old
+    background's colour (sky, walls) does not leak into the edge."""
+    car = rgb.astype(np.float32)
+    rim = (alpha > 0.01) & (alpha < 0.98)
+    if not rim.any():
+        return car
+    solid = (alpha >= 0.98).astype(np.float32)
+    r = 3.0
+    num = cv2.GaussianBlur(car * solid[..., None], (0, 0), r)
+    den = cv2.GaussianBlur(solid, (0, 0), r)[..., None]
+    inner = num / np.maximum(den, 1e-4)
+    use = (rim & (den[..., 0] > 0.05))[..., None]
+    return np.where(use, inner, car)
 
 
 class LocalComposite:
