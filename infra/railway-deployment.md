@@ -5,7 +5,7 @@ One Docker image (`backend/Dockerfile`), two services, plus Redis.
 | Service | Start command | Public |
 |---|---|---|
 | `api` | default `CMD` (uvicorn on `$PORT`) | Yes — generate a domain |
-| `worker` | `celery -A app.workers.celery_app worker -B --loglevel=INFO --concurrency=1 --max-memory-per-child=700000` | No |
+| `worker` | `celery -A app.workers.celery_app worker -B --loglevel=INFO --concurrency=1 --max-tasks-per-child=1 --max-memory-per-child=600000` | No |
 | `redis` | Railway Redis template | No (private network) |
 
 `-B` runs the beat scheduler inside the worker (outbox dispatch, stuck-job requeue, retention cleanup).

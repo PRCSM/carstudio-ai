@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     gemini_paid_api_key: str = ""
     gemini_free_api_key: str = ""
     # Comma list, best first; 404s fall through to the next. Gemini 3 Pro Image gives real 2K/4K output.
-    gemini_image_model: str = "gemini-3-pro-image-preview,gemini-3.1-flash-image-preview,gemini-2.5-flash-image"
+    gemini_image_model: str = ("gemini-3-pro-image,gemini-3-pro-image-preview,gemini-3.1-flash-image,"
+                               "gemini-3.1-flash-image-preview,gemini-2.5-flash-image")
     image_output_size: str = "2K"  # imageConfig.imageSize for Gemini 3 image models: 1K | 2K | 4K
     gemini_vision_model: str = "gemini-2.5-flash"  # verify current ID in AI Studio
     vision_enabled: bool = True
@@ -73,7 +74,7 @@ class Settings(BaseSettings):
     composite_fallback: bool = False
     # Move the customer's real fine detail back onto same-angle AI outputs (badges, grille, wheels).
     detail_transfer: bool = True
-    detail_strength: float = 0.75
+    detail_strength: float = 0.85
     max_set_photos: int = 6
     max_angle_references: int = 3
     angle_targets: str = "front,front_three_quarter_left,left_side,rear_three_quarter_left,rear,right_side"

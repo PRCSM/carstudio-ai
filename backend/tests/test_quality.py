@@ -40,7 +40,7 @@ def _soft_studio_output(src, car, scale=1.5):
 def test_detail_transfer_restores_real_detail_on_the_car():
     src, car = _scene()
     out, mask, gt = _soft_studio_output(src, car)
-    res, m = enhance_detail(to_jpeg(src, quality=95), to_jpeg(out, quality=95), car_mask=mask)
+    res, m = enhance_detail(to_jpeg(src, quality=95), to_jpeg(out, quality=95), car_mask=mask, src_mask=car)
     assert m["detail"] == "applied" and abs(m["scale"] - 1.5) < 0.02
     assert m["sharpness_after"] > 2 * m["sharpness_before"]
     r = np.asarray(Image.open(io.BytesIO(res)).convert("L")).astype(np.float32)
@@ -53,11 +53,11 @@ def test_detail_transfer_restores_real_detail_on_the_car():
 
 
 def test_detail_transfer_skips_unrelated_images():
-    src, _ = _scene(seed=1)
+    src, car = _scene(seed=1)
     other, car2 = _scene(seed=7)
     other = cv2.flip(other, 1)
-    res, m = enhance_detail(to_jpeg(src), to_jpeg(other), car_mask=car2)
-    assert m["detail"] == "skipped"
+    res, m = enhance_detail(to_jpeg(src), to_jpeg(other), car_mask=car2, src_mask=car)
+    assert m["detail"] == "skipped", m
     assert np.abs(np.asarray(Image.open(io.BytesIO(res))).astype(float) - other.astype(float)).mean() < 3
 
 
