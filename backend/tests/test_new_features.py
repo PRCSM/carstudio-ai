@@ -141,7 +141,9 @@ def test_watermark_message_names_what_was_found():
     assert watermark_message({"overlays": []}) == WATERMARK_MESSAGE
 
 
-def test_watermark_removal_prompt_is_explicit_and_opt_in():
-    plain = same_angle_prompt("white_studio", cleanup=True)
-    with_mark = same_angle_prompt("white_studio", cleanup=True, remove_watermark=True)
-    assert "Remove it completely" not in plain and "Remove it completely" in with_mark
+def test_relight_prompt_only_touches_lighting():
+    from app.services.prompts import relight_prompt
+
+    p = relight_prompt("dark_luxury")
+    assert "Only harmonize lighting" in p and "Do not change the car" in p
+    assert "watermark" not in p.lower()  # never asks the model to remove marks

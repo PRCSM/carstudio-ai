@@ -42,11 +42,6 @@ OVERLAY_CLEANUP = (
     "Keep text that is physically on the car itself (badges, model names) exactly as it is."
 )
 
-WATERMARK_REMOVAL = (
-    "The photo also carries a watermark or logo stamped over the image (for example a website or dealer "
-    "mark, usually in a corner). Remove it completely so the result is a clean photograph."
-)
-
 NOVEL_ANGLE_TEMPLATE = (
     "Using ALL supplied reference photos of the SAME vehicle, create one photorealistic studio photograph "
     "of that exact vehicle from this viewpoint: {angle}. Scene: {scene}. Lighting: soft professional "
@@ -79,13 +74,19 @@ def scene_for(style: str) -> str:
         raise UnknownStyle(style) from None
 
 
-def same_angle_prompt(style: str, *, cleanup: bool = False, remove_watermark: bool = False) -> str:
+def same_angle_prompt(style: str, *, cleanup: bool = False) -> str:
     prompt = f"{SYSTEM_INSTRUCTION}\n\n{SAME_ANGLE_TEMPLATE.format(scene=scene_for(style))}"
-    if cleanup or remove_watermark:
+    if cleanup:
         prompt += f"\n\n{OVERLAY_CLEANUP}"
-    if remove_watermark:
-        prompt += f"\n\n{WATERMARK_REMOVAL}"
     return prompt
+
+
+PROMPT_VERSION_RELIGHT = "relight_composite_v1"
+
+
+def relight_prompt(style: str) -> str:
+    """For an image we already composited onto a studio background: polish lighting only."""
+    return f"{SYSTEM_INSTRUCTION}\n\n{RELIGHT_TEMPLATE.format(scene=scene_for(style))}"
 
 
 def novel_angle_prompt(style: str, angle: str) -> str:

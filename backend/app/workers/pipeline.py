@@ -21,8 +21,8 @@ from app.services import qa as qa_mod
 from app.services.budget import DbBudget
 from app.services.job_state import TERMINAL_STATUSES, can_transition, transition
 from app.services.plate import blur_plates
-from app.services.prompts import (PROMPT_VERSION, PROMPT_VERSION_ANGLE, PROMPT_VERSION_CLEAN, novel_angle_prompt,
-                                  same_angle_prompt)
+from app.services.prompts import (PROMPT_VERSION, PROMPT_VERSION_ANGLE, PROMPT_VERSION_CLEAN,
+                                  PROMPT_VERSION_RELIGHT, novel_angle_prompt, relight_prompt, same_angle_prompt)
 from app.services.vision import PROFILE_VERSION, VisionClient
 
 log = logging.getLogger(__name__)
@@ -237,13 +237,21 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
     if novel:
         prompt, prompt_version = novel_angle_prompt(job.style, job.target_angle), PROMPT_VERSION_ANGLE
     elif cleanup:
-        remove_mark = settings.watermark_policy == "remove" and has_foreign_watermark(_profile_of(db, job))
-        prompt = same_angle_prompt(job.style, cleanup=True, remove_watermark=remove_mark)
-        prompt_version = PROMPT_VERSION_CLEAN + ("+wm" if remove_mark else "")
+        prompt, prompt_version = same_angle_prompt(job.style, cleanup=True), PROMPT_VERSION_CLEAN
     else:
         prompt, prompt_version = same_angle_prompt(job.style), PROMPT_VERSION
-    req = EditRequest(image=source, prompt=prompt, style=job.style, width=upload.width, height=upload.height,
-                      image_url=signed, extra_images=references[1:], novel_view=novel)
+    model_input, input_url = source, signed
+    if (not novel and cleanup and settings.watermark_policy == "remove"
+            and has_foreign_watermark(_profile_of(db, job))):
+        # The image model refuses requests to remove watermarks, and we don't disguise such requests.
+        # Instead our own cut-out puts the real car on a studio background (a watermark over the old
+        # background goes with it), and the model is only asked to polish the lighting of that image.
+        staged = _stage_on_studio(source, job.style)
+        if staged is not None:
+            model_input, input_url = staged, None
+            prompt, prompt_version = relight_prompt(job.style), PROMPT_VERSION_RELIGHT
+    req = EditRequest(image=model_input, prompt=prompt, style=job.style, width=upload.width, height=upload.height,
+                      image_url=input_url, extra_images=references[1:], novel_view=novel)
     allow_training = allow_training_providers(settings, customer.consent_version if customer else None)
     blur_plate = job.hide_plate and settings.feature_plate_blur and not novel  # novel angles render plates blank
 
@@ -260,6 +268,9 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         try:
             outcome = chain.run(req, budget=budget, allow_training_providers=allow_training)
         except PolicyRejected:
+            if settings.composite_fallback and not novel and _try_composite_fallback(
+                    db, job, source, settings, storage, vision, blur_plate):
+                return job.status
             _finish(db, job, "failed", error_code="policy_rejected",
                     message="This image can't be processed.")
             return job.status
@@ -329,6 +340,18 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
                 message="We couldn't produce a faithful studio image from this photo. "
                         "Try a clearer photo of the whole car.")
     return job.status
+
+
+def _stage_on_studio(source: bytes, style: str) -> bytes | None:
+    from app.providers.base import ProviderError
+    from app.providers.local_composite import composite
+
+    try:
+        image, _ = composite(source, style)
+        return image
+    except ProviderError as e:
+        log.warning("could not stage watermarked photo on studio background: %s", e)
+        return None
 
 
 def _try_composite_fallback(db, job: GenerationJob, source: bytes, settings: Settings, storage,
