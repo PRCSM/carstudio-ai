@@ -61,7 +61,12 @@ class Settings(BaseSettings):
     feature_sets: bool = False            # albums / multi-photo sets
     feature_novel_angles: bool = False    # AI-generated extra angles (labelled visualizations)
     feature_plate_blur: bool = False      # optional number-plate blur
-    feature_overlay_cleanup: bool = False  # remove screenshot UI / timestamps / stickers; reject watermarks
+    feature_overlay_cleanup: bool = False  # remove screenshot UI / timestamps / stickers
+    # What to do with another site's watermark: "ask_original" (refuse, ask for the camera original)
+    # or "remove" (erase it; only for private testing on photos you are allowed to edit).
+    watermark_policy: str = "ask_original"
+    # Fall back to the pixel-preserving local composite when every AI attempt fails QA (same-angle only).
+    composite_fallback: bool = False
     max_set_photos: int = 6
     max_angle_references: int = 3
     angle_targets: str = "front,front_three_quarter_left,left_side,rear_three_quarter_left,rear,right_side"

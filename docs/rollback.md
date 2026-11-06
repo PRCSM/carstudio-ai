@@ -9,7 +9,9 @@ Known-good version: **v0.1** (single photo, Telegram bot v1). Git branch `stable
 | `FEATURE_SETS` | Albums of up to 6 photos studio-edited as one set |
 | `FEATURE_NOVEL_ANGLES` | "Create extra angles" mode (AI visualizations from 1–3 photos) |
 | `FEATURE_PLATE_BLUR` | Optional number-plate blur |
-| `FEATURE_OVERLAY_CLEANUP` | Removes screenshot buttons / timestamps / stickers; asks for originals when another site's watermark is found |
+| `FEATURE_OVERLAY_CLEANUP` | Removes screenshot buttons / timestamps / stickers |
+| `WATERMARK_POLICY` | `ask_original` (default): refuse photos with another site's watermark. `remove`: erase it (currently set for private testing; switch back before any public use) |
+| `COMPOSITE_FALLBACK` | When every AI attempt fails QA, deliver the pixel-preserving local composite instead of failing |
 
 ## Switch to v2
 

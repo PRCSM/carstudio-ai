@@ -139,3 +139,10 @@ def test_watermark_message_names_what_was_found():
     assert "Team-BHP watermark in the bottom-left corner)" in watermark_message(profile)
     assert not has_foreign_watermark({"overlays": [{"type": "timestamp"}]})
     assert watermark_message({"overlays": []}) == WATERMARK_MESSAGE
+
+
+def test_watermark_removal_prompt_is_explicit_and_opt_in():
+    assert "watermark" not in same_angle_prompt("white_studio", cleanup=True).lower().split("remove it")[0][-0:]
+    plain = same_angle_prompt("white_studio", cleanup=True)
+    with_mark = same_angle_prompt("white_studio", cleanup=True, remove_watermark=True)
+    assert "Remove it completely" not in plain and "Remove it completely" in with_mark

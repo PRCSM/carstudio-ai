@@ -27,6 +27,9 @@ from app.services.vision import PROFILE_VERSION, VisionClient
 
 log = logging.getLogger(__name__)
 
+UNUSABLE_BLUR = 15.0   # Laplacian variance; below this almost no edges survive
+UNUSABLE_DARK = 20.0   # mean brightness 0-255
+
 ORDER = ["queued", "validating", "analyzing", "preparing", "generating", "verifying"]
 WATERMARK_MESSAGE = ("This looks like a screenshot or a photo with another website's watermark. "
                      "Please send the original photo from your camera for the best result.")
@@ -128,6 +131,13 @@ def has_foreign_watermark(profile: dict | None) -> bool:
                for o in (profile or {}).get("overlays") or [])
 
 
+def _profile_of(db, job: GenerationJob) -> dict | None:
+    if job.vehicle_id is None:
+        return None
+    vehicle = db.get(Vehicle, job.vehicle_id)
+    return vehicle.profile if vehicle else None
+
+
 def watermark_message(profile: dict | None) -> str:
     found = next((o.get("description") for o in (profile or {}).get("overlays") or []
                   if isinstance(o, dict) and o.get("type") == "watermark_or_logo" and o.get("description")), None)
@@ -177,11 +187,13 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
     # 1. validate
     _advance(db, job, "validating")
     q = upload.quality or {}
-    if q.get("is_blurry") or q.get("too_dark"):
-        reason = "blurry" if q.get("is_blurry") else "too_dark"
+    unusable = (q.get("blur_variance", 999) < UNUSABLE_BLUR) or (q.get("mean_brightness", 128) < UNUSABLE_DARK)
+    if unusable:
+        reason = "blurry" if q.get("blur_variance", 999) < UNUSABLE_BLUR else "too_dark"
         _finish(db, job, "needs_more_images", error_code=f"source_{reason}",
-                message="Please send a sharper, well-lit photo of the whole car.")
+                message="This photo is too blurry or dark to work with. Please send a sharper, well-lit photo.")
         return job.status
+    # Mildly blurry / dark photos are processed anyway; the customer was already warned at upload.
 
     # 2. analyze (advisory)
     _advance(db, job, "analyzing")
@@ -190,7 +202,8 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
             GenerationJob.set_id == job.set_id, GenerationJob.source_upload_id == job.source_upload_id,
             GenerationJob.vehicle_id.is_not(None), GenerationJob.id != job.id))
         if sibling is not None:
-            if sibling.error_code in ("watermarked_source", "no_clear_car"):
+            if sibling.error_code == "no_clear_car" or (sibling.error_code == "watermarked_source"
+                                                       and settings.watermark_policy != "remove"):
                 _finish(db, job, "needs_more_images", error_code=sibling.error_code, message=sibling.error_message)
                 return job.status
             job.vehicle_id = sibling.vehicle_id  # same photo, same answer: don't pay to analyse it again
@@ -211,8 +224,8 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
                         message=profile.get("retake_reason") or "We couldn't see a car clearly. "
                                 "Please send a photo showing the whole vehicle.")
                 return job.status
-            if cleanup and has_foreign_watermark(profile):
-                # We don't strip other businesses' watermarks; ask for the customer's own original.
+            if cleanup and has_foreign_watermark(profile) and settings.watermark_policy != "remove":
+                # Default: don't strip other sites' watermarks; ask for the customer's own original.
                 _finish(db, job, "needs_more_images", error_code="watermarked_source",
                         message=watermark_message(profile))
                 return job.status
@@ -224,7 +237,9 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
     if novel:
         prompt, prompt_version = novel_angle_prompt(job.style, job.target_angle), PROMPT_VERSION_ANGLE
     elif cleanup:
-        prompt, prompt_version = same_angle_prompt(job.style, cleanup=True), PROMPT_VERSION_CLEAN
+        remove_mark = settings.watermark_policy == "remove" and has_foreign_watermark(_profile_of(db, job))
+        prompt = same_angle_prompt(job.style, cleanup=True, remove_watermark=remove_mark)
+        prompt_version = PROMPT_VERSION_CLEAN + ("+wm" if remove_mark else "")
     else:
         prompt, prompt_version = same_angle_prompt(job.style), PROMPT_VERSION
     req = EditRequest(image=source, prompt=prompt, style=job.style, width=upload.width, height=upload.height,
@@ -301,6 +316,11 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         if result.decision == "rejected":
             break
 
+    if settings.composite_fallback and not novel:
+        done = _try_composite_fallback(db, job, source, settings, storage, vision, blur_plate)
+        if done:
+            return job.status
+
     if best_review is not None:
         _finish(db, job, "review_required", error_code="needs_review",
                 message="Your photo is being checked by our team.", result_key=best_review.storage_key)
@@ -309,6 +329,37 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
                 message="We couldn't produce a faithful studio image from this photo. "
                         "Try a clearer photo of the whole car.")
     return job.status
+
+
+def _try_composite_fallback(db, job: GenerationJob, source: bytes, settings: Settings, storage,
+                            vision: VisionClient | None, blur_plate: bool) -> bool:
+    """Last resort so the customer still gets a faithful result: cut the real car out and place it in the
+    studio. Car pixels are never regenerated, so identity is preserved by construction."""
+    from app.providers.base import ProviderError
+    from app.providers.local_composite import LocalComposite
+
+    try:
+        res = LocalComposite().edit(EditRequest(image=source, prompt="", style=job.style, width=0, height=0))
+    except ProviderError as e:
+        log.warning("composite fallback failed for job %s: %s", job.id, e)
+        return False
+    result = qa_mod.technical_qa(source, res.image, pixel_preserving=True)
+    if result.decision != "approved":
+        return False
+    final_image, extra_meta = res.image, {}
+    if blur_plate:
+        final_image, extra_meta = apply_plate_blur(res.image, vision, DbBudget(db, settings.monthly_spend_limit_usd),
+                                                   settings, job)
+    job.attempt_count += 1
+    key = f"{job.customer_id}/{job.id}/fallback.jpg"
+    storage.upload(settings.storage_outputs_bucket, key, final_image, "image/jpeg")
+    db.add(GeneratedImage(job_id=job.id, attempt=job.attempt_count, storage_key=key, angle="source_view",
+                          provider=res.provider, model_id=res.model_id, prompt_version="composite_fallback",
+                          qa_status="approved",
+                          qa={**result.as_dict(), "fallback": True, "provider_meta": res.meta, **extra_meta}))
+    db.commit()
+    _finish(db, job, "completed", result_key=key)
+    return True
 
 
 def utcnow() -> datetime:
