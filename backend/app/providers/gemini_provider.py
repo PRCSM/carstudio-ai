@@ -8,14 +8,17 @@ from app.providers.base import (CreditExhausted, EditRequest, EditResult, Policy
                                 TransientProviderError)
 
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+# Vertex AI (billed through the normal Google Cloud account, so GCP credits apply).
+VERTEX_API = "https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
 
 
 class GeminiImage:
     def __init__(self, *, name: str, api_key: str, model: str, cost_usd: float, free_tier: bool,
-                 client: httpx.Client | None = None):
+                 endpoint: str = API, client: httpx.Client | None = None):
         self.name = name
         self.api_key = api_key
         self.model = model
+        self.endpoint = endpoint
         self.cost_per_call_usd = cost_usd
         self.shares_data_for_training = free_tier
         self.client = client or httpx.Client(timeout=httpx.Timeout(180, connect=10))
@@ -32,7 +35,8 @@ class GeminiImage:
             "generationConfig": {"responseModalities": ["IMAGE"]},
         }
         try:
-            r = self.client.post(API.format(model=self.model), json=body,
+            # key goes in a header, never the URL, so it can't leak into request logs
+            r = self.client.post(self.endpoint.format(model=self.model), json=body,
                                  headers={"x-goog-api-key": self.api_key})
         except httpx.TimeoutException as e:
             raise TransientProviderError("gemini timeout") from e

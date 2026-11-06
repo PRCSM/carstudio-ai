@@ -8,6 +8,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+VERTEX_API = "https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
 
 PROFILE_PROMPT = """Analyze this photo for an automotive studio-edit pipeline. Return JSON only:
 {"is_car_photo": bool, "car_clearly_visible": bool, "make": str|null, "model": str|null,
@@ -28,16 +29,17 @@ PROFILE_VERSION = "profile_v1"
 
 
 class VisionClient:
-    def __init__(self, api_key: str, model: str, client: httpx.Client | None = None):
+    def __init__(self, api_key: str, model: str, endpoint: str = API, client: httpx.Client | None = None):
         self.api_key = api_key
         self.model = model
+        self.endpoint = endpoint
         self.client = client or httpx.Client(timeout=60)
 
     def _call(self, prompt: str, images: list[bytes]) -> dict | None:
         parts = [{"text": prompt}] + [
             {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(i).decode()}} for i in images]
         try:
-            r = self.client.post(API.format(model=self.model), headers={"x-goog-api-key": self.api_key},
+            r = self.client.post(self.endpoint.format(model=self.model), headers={"x-goog-api-key": self.api_key},
                                  json={"contents": [{"role": "user", "parts": parts}],
                                        "generationConfig": {"responseMimeType": "application/json",
                                                             "temperature": 0}})

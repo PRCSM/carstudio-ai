@@ -126,8 +126,14 @@ def build_providers(settings) -> list[ImageProvider]:
         return GeminiImage(name="gemini_free", api_key=settings.gemini_free_api_key,
                            model=settings.gemini_image_model, cost_usd=0.0, free_tier=True)
 
-    registry.update(fal_flux_kontext=fal, gemini_paid=gemini_paid, gemini_free=gemini_free,
-                    local_composite=LocalComposite)
+    def vertex_gemini():
+        from app.providers.gemini_provider import VERTEX_API, GeminiImage
+        return GeminiImage(name="vertex_gemini", api_key=settings.vertex_api_key,
+                           model=settings.gemini_image_model, cost_usd=settings.price_gemini_paid,
+                           free_tier=False, endpoint=VERTEX_API)
+
+    registry.update(fal_flux_kontext=fal, vertex_gemini=vertex_gemini, gemini_paid=gemini_paid,
+                    gemini_free=gemini_free, local_composite=LocalComposite)
     unknown = [n for n in settings.chain if n not in registry]
     if unknown:
         raise ValueError(f"unknown providers in IMAGE_PROVIDER_CHAIN: {unknown}")

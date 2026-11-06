@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     image_provider_chain: str = "fal_flux_kontext,gemini_free,local_composite"
     fal_key: str = ""
     fal_model: str = "fal-ai/flux-pro/kontext"  # verify current model path on fal.ai
+    vertex_api_key: str = ""  # Google Cloud API key with Vertex AI enabled (uses GCP credits)
     gemini_paid_api_key: str = ""
     gemini_free_api_key: str = ""
     gemini_image_model: str = "gemini-2.5-flash-image"  # verify current ID in AI Studio

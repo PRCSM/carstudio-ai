@@ -35,8 +35,13 @@ def get_chain() -> ProviderChain:
 
 
 def get_vision() -> VisionClient | None:
-    # Vision only runs on the billed key, so customer photos never reach a free tier by default.
-    if settings.vision_enabled and settings.gemini_paid_api_key:
+    # Vision only runs on billed keys, so customer photos never reach a free tier by default.
+    if not settings.vision_enabled:
+        return None
+    if settings.vertex_api_key:
+        from app.services.vision import VERTEX_API
+        return VisionClient(settings.vertex_api_key, settings.gemini_vision_model, endpoint=VERTEX_API)
+    if settings.gemini_paid_api_key:
         return VisionClient(settings.gemini_paid_api_key, settings.gemini_vision_model)
     return None
 
