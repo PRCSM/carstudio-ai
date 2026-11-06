@@ -8,8 +8,8 @@ WORKDIR /srv
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .
 
-# Bake the background-removal model into the image so the free local layer works offline.
-RUN python -c "from rembg import new_session; new_session('isnet-general-use')"
+# Bake the background-removal model (u2netp: small enough for a 1 GB worker) so the free layer works offline.
+RUN python -c "from rembg import new_session; new_session('u2netp')"
 
 COPY app ./app
 COPY migrations ./migrations

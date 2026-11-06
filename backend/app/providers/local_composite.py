@@ -25,9 +25,12 @@ def _segment_rembg(rgb: np.ndarray) -> np.ndarray | None:
         from rembg import new_session, remove
     except ImportError:
         return None
+    import os
+
     global _REMBG_SESSION
     if "_REMBG_SESSION" not in globals():
-        _REMBG_SESSION = new_session("isnet-general-use")
+        # u2netp is tiny (~5 MB) and fits a 1 GB worker; isnet-general-use is sharper but needs >1 GB.
+        _REMBG_SESSION = new_session(os.environ.get("REMBG_MODEL", "u2netp"))
     out = remove(Image.fromarray(rgb), session=_REMBG_SESSION, only_mask=True)
     return np.asarray(out.convert("L"), dtype=np.uint8)
 
