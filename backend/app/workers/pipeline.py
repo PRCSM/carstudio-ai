@@ -174,6 +174,11 @@ def restore_detail(source: bytes, image: bytes, settings: Settings, profile: dic
         return ensure_jpeg(image), {"detail": "disabled"}
     if (profile or {}).get("overlays"):
         return ensure_jpeg(image), {"detail": "skipped", "reason": "overlays_in_source"}
+    from app.services.detail import log_mem, memory_headroom_mb
+    log_mem("before_detail")
+    free = memory_headroom_mb()
+    if free is not None and free < 450:  # segmentation + alignment + transfer of a 2K image
+        return ensure_jpeg(image), {"detail": "skipped", "reason": "low_memory", "free_mb": round(free)}
     try:
         return enhance_detail(source, image, strength=settings.detail_strength)
     except Exception as e:  # never lose a good result over an enhancement step
@@ -287,6 +292,8 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         db.commit()
 
         budget = DbBudget(db, settings.monthly_spend_limit_usd)
+        from app.services.detail import log_mem
+        log_mem("before_generate")
         try:
             outcome = chain.run(req, budget=budget, allow_training_providers=allow_training)
         except PolicyRejected:
@@ -311,6 +318,7 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
                           job_id=job.id, customer_id=job.customer_id)
 
         transition(db, job, "verifying")
+        log_mem("after_generate")
         pixel_preserving = res.provider == "local_composite"
         result = qa_mod.technical_qa(source, res.image, pixel_preserving=pixel_preserving, novel_view=novel)
         if novel:

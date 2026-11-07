@@ -245,6 +245,22 @@ def memory_headroom_mb() -> float | None:
         return None
 
 
+def _rss_mb() -> float:
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return -1.0
+
+
+def log_mem(stage: str) -> None:
+    free = memory_headroom_mb()
+    log.info("mem %s: rss=%.0fMB headroom=%s", stage, _rss_mb(), "n/a" if free is None else f"{free:.0f}MB")
+
+
 def _segment(rgb: np.ndarray) -> np.ndarray:
     from app.providers.local_composite import segment_car
     mask, _ = segment_car(rgb)
@@ -260,14 +276,18 @@ def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
     h, w = out.shape[:2]
     if max(h, w) > MAX_OUTPUT_SIDE:
         return output, {"detail": "skipped", "reason": "output_too_large"}
+    log_mem("detail:start")
     if car_mask is None:
         car_mask = _segment(out)
+        log_mem("detail:segmented_output")
     if src_mask is None:
         src_mask = _segment(src)
+        log_mem("detail:segmented_source")
     if car_mask.shape != (h, w):
         car_mask = cv2.resize(car_mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
     m, info = estimate_alignment(src, out, src_mask, car_mask)
+    log_mem("detail:aligned")
     if m is None:
         return encode_jpeg(out), {"detail": "skipped", **info}
 
@@ -295,6 +315,7 @@ def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
     del src
     warped, conf = _refine_flow(warped, out, valid)
     del valid
+    log_mem("detail:flow")
 
     # stay off the silhouette: the background there is new, so source detail would draw a ghost outline
     erode = max(3, int(0.008 * max(h, w)))
@@ -349,6 +370,7 @@ def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
     y_new += 0.25 * edge * (np.abs(edge) > 2.0) * mask
     del edge
     after = sharpness(y_new, mask)
+    log_mem("detail:transferred")
 
     ycc_out[..., 0] = np.clip(y_new, 0, 255).astype(np.uint8)
     result = full_out.copy()
