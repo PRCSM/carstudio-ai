@@ -3,7 +3,7 @@
 Turns a customer's car photo into a 2K studio-style image, through a Telegram bot, while keeping
 the *observed* vehicle unchanged. Generated lighting and backgrounds are AI edits, not evidence of condition.
 
-**Interactive architecture board:** https://prcsm.github.io/carstudio-ai/
+**Interactive architecture board:** https://architecture-production-6546.up.railway.app
 (click any card for what it does and why, or switch to *Flows* to watch a request travel through the system)
 
 ## How a photo becomes a studio image
