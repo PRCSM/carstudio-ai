@@ -262,9 +262,11 @@ def log_mem(stage: str) -> None:
 
 
 def _segment(rgb: np.ndarray) -> np.ndarray:
-    from app.providers.local_composite import segment_car
-    mask, _ = segment_car(rgb)
-    return mask
+    """Rough car mask for alignment and gating. GrabCut at 640 px is enough here (edges are eroded and
+    every pixel is gated by structural agreement) and costs a few MB; rembg on a 2K frame took ~700 MB
+    and got the 1 GB worker OOM-killed."""
+    from app.providers.local_composite import _segment_grabcut
+    return _segment_grabcut(rgb)
 
 
 def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
