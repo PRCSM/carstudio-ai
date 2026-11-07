@@ -20,7 +20,7 @@ from PIL import Image
 
 log = logging.getLogger(__name__)
 
-WORK_SIDE = 1200          # feature matching / flow resolution
+WORK_SIDE = 800           # feature matching resolution (SIFT doubles it internally: ~80 MB here)
 MAX_OUTPUT_SIDE = 3200    # bigger outputs are left alone (memory on a 1 GB worker)
 MIN_SCORE = 0.45          # edge-structure correlation needed to trust an alignment
 
@@ -181,23 +181,29 @@ def estimate_alignment(src: np.ndarray, out: np.ndarray, src_mask: np.ndarray | 
 
 def _refine_flow(warped: np.ndarray, out: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Dense optical flow (output -> warped source) to absorb the model's small local redraw shifts.
-    Returns the re-warped source and a 0-1 confidence map (low where the needed shift is large)."""
+    Returns the re-warped source and a 0-1 confidence map (low where the needed shift is large).
+    Flow, magnitude and confidence are computed at <=1024 px; only the two remap grids are full size."""
     h, w = out.shape[:2]
     gw, s = _gray_small(warped, 1024)
     go, _ = _gray_small(out, 1024)
     dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
-    flow = dis.calc(go, gw, None)
-    flow = cv2.GaussianBlur(flow, (0, 0), 2.0)
-    flow = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR) / s
-    mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+    flow = cv2.GaussianBlur(dis.calc(go, gw, None), (0, 0), 2.0)
+    mag = cv2.magnitude(flow[..., 0], flow[..., 1]) / s          # in full-res pixels
     limit = 0.02 * max(h, w)
-    conf = np.clip(1.0 - (mag - limit * 0.6) / (limit * 0.4), 0, 1).astype(np.float32)
+    conf_s = np.clip(1.0 - (mag - limit * 0.6) / (limit * 0.4), 0, 1).astype(np.float32)
     flow *= (mag <= limit)[..., None]
-    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-    map_x, map_y = gx + flow[..., 0], gy + flow[..., 1]
-    del gx, gy, flow, mag
+    map_x = cv2.resize(flow[..., 0], (w, h), interpolation=cv2.INTER_LINEAR)
+    map_x /= s
+    map_x += np.arange(w, dtype=np.float32)[None, :]
+    map_y = cv2.resize(flow[..., 1], (w, h), interpolation=cv2.INTER_LINEAR)
+    map_y /= s
+    map_y += np.arange(h, dtype=np.float32)[:, None]
+    del flow, mag
     rewarped = cv2.remap(warped, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-    conf *= cv2.remap(valid, map_x, map_y, cv2.INTER_NEAREST, borderValue=0)
+    valid_r = cv2.remap(valid, map_x, map_y, cv2.INTER_NEAREST, borderValue=0)
+    del map_x, map_y
+    conf = cv2.resize(conf_s, (w, h), interpolation=cv2.INTER_LINEAR)
+    conf *= valid_r
     return rewarped, conf
 
 
@@ -216,6 +222,27 @@ def _local_ncc(a: np.ndarray, b: np.ndarray, win: float) -> np.ndarray:
 def sharpness(y: np.ndarray, mask: np.ndarray | None = None) -> float:
     lap = cv2.Laplacian(y.astype(np.float32), cv2.CV_32F)
     return float(lap[mask > 0.5].var()) if mask is not None and (mask > 0.5).any() else float(lap.var())
+
+
+BYTES_PER_PIXEL = 60  # measured RSS growth of the full-res stage (~45 B/px), with margin
+
+
+def memory_headroom_mb() -> float | None:
+    """Memory still available under this container's cgroup limit, or None when it can't be read.
+    Reclaimable page cache (inactive files) is not counted as used."""
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            limit = f.read().strip()
+        if limit == "max":
+            return None
+        with open("/sys/fs/cgroup/memory.current") as f:
+            used = int(f.read().strip())
+        with open("/sys/fs/cgroup/memory.stat") as f:
+            stat = dict(line.split() for line in f if line.strip())
+        used -= int(stat.get("inactive_file", 0))
+        return (int(limit) - used) / 1_048_576
+    except (OSError, ValueError):
+        return None
 
 
 def _segment(rgb: np.ndarray) -> np.ndarray:
@@ -244,8 +271,26 @@ def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
     if m is None:
         return encode_jpeg(out), {"detail": "skipped", **info}
 
-    warped = cv2.warpAffine(src, m, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
-    valid = cv2.warpAffine(np.ones(src.shape[:2], np.float32), m, (w, h), flags=cv2.INTER_NEAREST,
+    # Full-resolution work happens only inside the car's bounding box.
+    ys_, xs_ = np.nonzero(car_mask > 127)
+    pad = int(0.03 * max(h, w))
+    x0, x1 = max(0, int(xs_.min()) - pad), min(w, int(xs_.max()) + pad + 1)
+    y0, y1 = max(0, int(ys_.min()) - pad), min(h, int(ys_.max()) + pad + 1)
+    del ys_, xs_
+    need = (x1 - x0) * (y1 - y0) * BYTES_PER_PIXEL / 1_048_576 + 80
+    free = memory_headroom_mb()
+    if free is not None and free < need:
+        return encode_jpeg(out), {"detail": "skipped", "reason": "low_memory", "free_mb": round(free),
+                                  "need_mb": round(need), **info}
+    full_out, (fh, fw) = out, (h, w)
+    out = np.ascontiguousarray(out[y0:y1, x0:x1])
+    car_mask = car_mask[y0:y1, x0:x1]
+    h, w = out.shape[:2]
+    mc = m.copy()
+    mc[:, 2] -= (x0, y0)
+
+    warped = cv2.warpAffine(src, mc, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
+    valid = cv2.warpAffine(np.ones(src.shape[:2], np.uint8), mc, (w, h), flags=cv2.INTER_NEAREST,
                            borderValue=0)
     del src
     warped, conf = _refine_flow(warped, out, valid)
@@ -255,7 +300,7 @@ def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
     erode = max(3, int(0.008 * max(h, w)))
     mask = cv2.erode((car_mask > 127).astype(np.uint8), np.ones((erode, erode), np.uint8)).astype(np.float32)
     if mask.mean() < 0.01:
-        return encode_jpeg(out), {"detail": "skipped", "reason": "no_car_mask", **info}
+        return encode_jpeg(full_out), {"detail": "skipped", "reason": "no_car_mask", **info}
 
     ycc_out = cv2.cvtColor(out, cv2.COLOR_RGB2YCrCb)
     del out
@@ -306,9 +351,10 @@ def enhance_detail(source: bytes, output: bytes, *, strength: float = 0.85,
     after = sharpness(y_new, mask)
 
     ycc_out[..., 0] = np.clip(y_new, 0, 255).astype(np.uint8)
-    result = cv2.cvtColor(ycc_out, cv2.COLOR_YCrCb2RGB)
+    result = full_out.copy()
+    result[y0:y1, x0:x1] = cv2.cvtColor(ycc_out, cv2.COLOR_YCrCb2RGB)
     metrics = {"detail": "applied", **info,
                "transfer_coverage": round(float((weight > 0.1).mean() / max(mask.mean(), 1e-6)), 3),
                "gates": gates, "sharpness_before": round(before, 1), "sharpness_after": round(after, 1),
-               "output_size": [w, h]}
+               "output_size": [fw, fh], "region": [x0, y0, x1, y1]}
     return encode_jpeg(result), metrics
