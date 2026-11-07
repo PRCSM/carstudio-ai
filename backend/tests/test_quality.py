@@ -86,3 +86,29 @@ def test_jpeg_is_high_quality_444():
     Image.fromarray(rgb).save(png, "PNG")
     assert ensure_jpeg(png.getvalue())[:3] == b"\xff\xd8\xff"
     assert ensure_jpeg(data) is data
+
+
+def test_u2net_mask_pre_and_post_processing():
+    from app.providers.local_composite import u2net_mask
+
+    seen = {}
+
+    class FakeInput:
+        name = "input.1"
+
+    class FakeSession:
+        def get_inputs(self):
+            return [FakeInput()]
+
+        def run(self, _outputs, feed):
+            x = feed["input.1"]
+            seen["shape"], seen["dtype"] = x.shape, x.dtype
+            pred = np.zeros((1, 1, 320, 320), np.float32)
+            pred[0, 0, 100:220, 60:260] = 5.0                       # salient block
+            return [pred]
+
+    rgb = np.random.default_rng(0).integers(0, 255, (600, 900, 3)).astype(np.uint8)
+    mask = u2net_mask(rgb, FakeSession())
+    assert seen["shape"] == (1, 3, 320, 320) and seen["dtype"] == np.float32
+    assert mask.shape == (600, 900) and mask.dtype == np.uint8
+    assert mask[300, 450] > 200 and mask[20, 20] < 30

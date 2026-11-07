@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -24,6 +25,7 @@ settings = get_settings()
 _redis = redis.Redis.from_url(settings.redis_url)
 _chain: ProviderChain | None = None
 OUTAGE_RETRIES = 5
+LOCK_TTL = 120  # seconds; renewed every 40 s while the job runs
 
 
 def get_chain() -> ProviderChain:
@@ -48,22 +50,43 @@ def get_vision() -> VisionClient | None:
 
 @celery.task(bind=True, max_retries=OUTAGE_RETRIES, name="app.workers.tasks.process_job")
 def process_job(self, job_id: str):
-    # Lock TTL slightly above the task hard limit, so a killed worker's lock expires on its own.
-    lock = _redis.lock(f"lock:job:{job_id}", timeout=960, blocking=False)
+    # Short lock kept alive by a heartbeat thread: if the worker process is killed (e.g. out of memory)
+    # the heartbeat stops and the lock frees itself within LOCK_TTL instead of blocking for 16 minutes.
+    lock = _redis.lock(f"lock:job:{job_id}", timeout=LOCK_TTL, blocking=False)
     if not lock.acquire(blocking=False):
         log.info("job %s is locked by another run; checking again later", job_id)
-        raise self.retry(countdown=120, max_retries=OUTAGE_RETRIES + 10)
+        raise self.retry(countdown=60, max_retries=OUTAGE_RETRIES + 20)
+    stop = threading.Event()
+
+    def heartbeat():
+        while not stop.wait(LOCK_TTL / 3):
+            try:
+                lock.reacquire()
+            except Exception:
+                return
+
+    threading.Thread(target=heartbeat, daemon=True).start()
+    # Count runs that never reached the end: one crash => the next run uses safe mode.
+    runs_key = f"runs:job:{job_id}"
+    started = _redis.incr(runs_key)
+    _redis.expire(runs_key, 3 * 3600)
+    safe_mode = started > 1
+    if safe_mode:
+        log.warning("job %s crashed a worker before (run %s); running in safe mode", job_id, started)
     try:
         with session_scope() as db:
             status = run_job(db, uuid.UUID(job_id), settings=settings, storage=get_storage(),
                              chain=get_chain(), vision=get_vision(),
-                             final_retry=self.request.retries >= OUTAGE_RETRIES)
+                             final_retry=self.request.retries >= OUTAGE_RETRIES, safe_mode=safe_mode)
             log.info("job finished", extra={"job_id": job_id, "status": status})
+        _redis.delete(runs_key)
     except RetryLater:
+        _redis.delete(runs_key)  # an outage is not a crash
         countdown = min(60 * 2 ** self.request.retries, 900)
         log.warning("providers unavailable; retrying job %s in %ss", job_id, countdown)
         raise self.retry(countdown=countdown) from None
     finally:
+        stop.set()
         try:
             lock.release()
         except Exception:
@@ -115,7 +138,7 @@ def requeue_stuck():
             GenerationJob.status == "queued", GenerationJob.created_at < now - timedelta(minutes=3)).limit(50)).all()
         orphaned = db.scalars(select(GenerationJob.id).where(
             GenerationJob.status.in_(in_progress),
-            GenerationJob.started_at < now - timedelta(minutes=17)).limit(50)).all()
+            GenerationJob.started_at < now - timedelta(minutes=5)).limit(50)).all()
         ids = [i for i in [*queued, *orphaned] if not _redis.exists(f"lock:job:{i}")]
         # give up on jobs that keep dying (e.g. repeatedly killed for memory) instead of looping forever
         hopeless = db.scalars(select(GenerationJob).where(

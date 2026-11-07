@@ -20,19 +20,59 @@ STYLE_PALETTES = {
 }
 
 
+_U2_SESSION = None
+U2_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+U2_STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+
+def _u2_session():
+    """The baked u2netp ONNX model, run directly with one thread and no memory arena. Going through
+    rembg's own session used ~700 MB (thread pools/arenas sized to the host CPU count) and got the
+    1 GB worker OOM-killed; this needs ~50 MB."""
+    global _U2_SESSION
+    if _U2_SESSION is None:
+        import os
+
+        import onnxruntime as ort
+
+        name = os.environ.get("REMBG_MODEL", "u2netp")
+        home = os.environ.get("U2NET_HOME", os.path.expanduser("~/.u2net"))
+        path = os.path.join(home, f"{name}.onnx")
+        if not os.path.exists(path):
+            return None
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
+        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        _U2_SESSION = ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+    return _U2_SESSION
+
+
+def u2net_mask(rgb: np.ndarray, session) -> np.ndarray:
+    """Same pre/post-processing as rembg's u2net sessions: 320x320, scale to max 1, ImageNet
+    normalisation; min-max normalised saliency back at the input size."""
+    h, w = rgb.shape[:2]
+    im = cv2.resize(rgb, (320, 320), interpolation=cv2.INTER_LANCZOS4).astype(np.float32)
+    im /= max(float(im.max()), 1e-6)
+    im = (im - U2_MEAN) / U2_STD
+    inp = np.ascontiguousarray(im.transpose(2, 0, 1)[None])
+    pred = session.run(None, {session.get_inputs()[0].name: inp})[0][0, 0]
+    lo, hi = float(pred.min()), float(pred.max())
+    pred = (pred - lo) / max(hi - lo, 1e-8)
+    return cv2.resize((pred * 255).astype(np.uint8), (w, h), interpolation=cv2.INTER_LANCZOS4)
+
+
 def _segment_rembg(rgb: np.ndarray) -> np.ndarray | None:
     try:
-        from rembg import new_session, remove
-    except ImportError:
+        session = _u2_session()
+    except Exception as e:  # missing onnxruntime / bad model file: fall back to GrabCut
+        log.warning("u2net session unavailable: %s", e)
         return None
-    import os
-
-    global _REMBG_SESSION
-    if "_REMBG_SESSION" not in globals():
-        # u2netp is tiny (~5 MB) and fits a 1 GB worker; isnet-general-use is sharper but needs >1 GB.
-        _REMBG_SESSION = new_session(os.environ.get("REMBG_MODEL", "u2netp"))
-    out = remove(Image.fromarray(rgb), session=_REMBG_SESSION, only_mask=True)
-    return np.asarray(out.convert("L"), dtype=np.uint8)
+    if session is None:
+        return None
+    return u2net_mask(rgb, session)
 
 
 def _segment_grabcut(rgb: np.ndarray) -> np.ndarray:

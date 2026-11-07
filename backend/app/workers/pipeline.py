@@ -187,7 +187,9 @@ def restore_detail(source: bytes, image: bytes, settings: Settings, profile: dic
 
 
 def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: ProviderChain,
-            vision: VisionClient | None, final_retry: bool = False) -> str:
+            vision: VisionClient | None, final_retry: bool = False, safe_mode: bool = False) -> str:
+    """safe_mode: a previous run of this job crashed the worker (e.g. out of memory), so skip the
+    optional local image steps (studio staging, detail transfer, composite fallback)."""
     job = db.get(GenerationJob, job_id)
     if job is None:
         log.warning("job %s not found", job_id)
@@ -267,7 +269,7 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         prompt, prompt_version = same_angle_prompt(job.style), PROMPT_VERSION
     model_input, input_url = source, signed
     mirror_axis = None
-    if (not novel and cleanup and settings.watermark_policy == "remove"
+    if (not novel and cleanup and not safe_mode and settings.watermark_policy == "remove"
             and has_foreign_watermark(_profile_of(db, job))):
         # The image model refuses requests to remove watermarks, and we don't disguise such requests.
         # Instead our own cut-out puts the real car on a studio background (a watermark over the old
@@ -297,7 +299,7 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         try:
             outcome = chain.run(req, budget=budget, allow_training_providers=allow_training)
         except PolicyRejected:
-            if settings.composite_fallback and not novel and _try_composite_fallback(
+            if settings.composite_fallback and not novel and not safe_mode and _try_composite_fallback(
                     db, job, source, settings, storage, vision, blur_plate):
                 return job.status
             _finish(db, job, "failed", error_code="policy_rejected",
@@ -336,9 +338,13 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
 
         final_image, extra_meta = res.image, {}
         if result.decision in ("approved", "review_required"):
-            if not novel and not pixel_preserving:
+            if not novel and not pixel_preserving and not safe_mode:
                 final_image, detail_meta = restore_detail(source, final_image, settings, _profile_of(db, job))
                 extra_meta["detail"] = detail_meta
+            elif safe_mode:
+                from app.services.detail import ensure_jpeg
+                final_image, extra_meta["detail"] = ensure_jpeg(final_image), {"detail": "skipped",
+                                                                               "reason": "safe_mode"}
             elif novel:
                 from app.services.detail import ensure_jpeg
                 final_image = ensure_jpeg(final_image)
@@ -366,7 +372,7 @@ def run_job(db, job_id: uuid.UUID, *, settings: Settings, storage, chain: Provid
         if result.decision == "rejected":
             break
 
-    if settings.composite_fallback and not novel:
+    if settings.composite_fallback and not novel and not safe_mode:
         done = _try_composite_fallback(db, job, source, settings, storage, vision, blur_plate)
         if done:
             return job.status
