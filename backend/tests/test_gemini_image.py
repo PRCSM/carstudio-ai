@@ -103,3 +103,43 @@ def test_retries_without_image_config_when_rejected():
 def test_budget_precheck_uses_most_expensive_model():
     p = _provider(lambda r: _ok())
     assert p.cost_per_call_usd == 0.134
+
+
+def test_pads_to_requested_aspect_and_crops_result_back_to_original_framing():
+    from app.providers.gemini_provider import pad_to_aspect
+
+    src = to_jpeg(np.full((1000, 1950, 3), 120, np.uint8))        # 1.95:1, nearest is 16:9
+    padded, frac = pad_to_aspect(src, "16:9")
+    pw, ph = Image.open(io.BytesIO(padded)).size
+    assert abs(pw / ph - 16 / 9) < 0.01 and frac[0] > 0 and frac[2] == 0
+
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        buf = io.BytesIO()
+        Image.new("RGB", (2752, 1536), (50, 60, 70)).save(buf, "PNG")    # what a 2K 16:9 model returns
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [
+            {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(buf.getvalue()).decode()}}]}}]})
+
+    req = EditRequest(image=src, prompt="p", style="white_studio", width=1950, height=1000)
+    res = _provider(handler).edit(req)
+    sent_img = Image.open(io.BytesIO(base64.b64decode(sent[0]["contents"][0]["parts"][1]["inline_data"]["data"])))
+    assert abs(sent_img.size[0] / sent_img.size[1] - 16 / 9) < 0.01
+    w, h = Image.open(io.BytesIO(res.image)).size
+    assert w == 2752 and abs(w / h - 1.95) < 0.01                  # customer's framing, at 2K
+    assert res.meta["padded_to"] == "16:9"
+
+
+def test_novel_views_are_not_padded():
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return _ok()
+
+    src = to_jpeg(np.full((1000, 1950, 3), 120, np.uint8))
+    req = EditRequest(image=src, prompt="p", style="white_studio", width=1950, height=1000, novel_view=True)
+    res = _provider(handler).edit(req)
+    assert "padded_to" not in res.meta
+    assert sent[0]["contents"][0]["parts"][1]["inline_data"]["data"] == base64.b64encode(src).decode()

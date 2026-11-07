@@ -149,19 +149,26 @@ def estimate_alignment(src: np.ndarray, out: np.ndarray, src_mask: np.ndarray | 
     mo_score = _small_mask(out_mask, go.shape)
     info: dict = {}
     candidates: dict[str, np.ndarray] = {}
-    m = _feature_alignment(gs, go, ms, mo, info)
-    if m is not None:
-        candidates["features"] = m
-        r = _ecc_refine(gs, go, m, mo)
-        if r is not None:
-            candidates["features+ecc"] = r
+    for name, src_kp_mask in (("features", ms), ("features_unmasked", None)):
+        m = _feature_alignment(gs, go, src_kp_mask, mo, info)
+        if m is not None:
+            candidates[name] = m
+            r = _ecc_refine(gs, go, m, mo)
+            if r is not None:
+                candidates[name + "+ecc"] = r
+        if name in candidates and info.get("inliers", 0) >= 40:
+            break  # a clear feature match; no need for the unmasked pass
+    # Edit models usually keep the composition: the transform is just the change of image size.
+    frame = np.array([[go.shape[1] / gs.shape[1], 0, 0], [0, go.shape[0] / gs.shape[0], 0]], np.float64)
+    candidates["frame"] = frame
+    r = _ecc_refine(gs, go, frame, mo)
+    if r is not None:
+        candidates["frame+ecc"] = r
     m = _mask_alignment(_small_mask(src_mask, gs.shape), mo_score)
     if m is not None:
         r = _ecc_refine(gs, go, m, mo)
         if r is not None:
             candidates["silhouette+ecc"] = r
-    if not candidates:
-        return None, {**info, "reason": "no_alignment"}
     scores = {k: alignment_score(gs, go, v, mo_score) for k, v in candidates.items()}
     best = max(scores, key=scores.get)
     m_small = candidates[best]
@@ -171,7 +178,8 @@ def estimate_alignment(src: np.ndarray, out: np.ndarray, src_mask: np.ndarray | 
     m_full[:, 2] /= so
     scale = float(np.sqrt(abs(np.linalg.det(m_full[:, :2]))))
     rot = float(np.degrees(np.arctan2(m_full[1, 0], m_full[0, 0])))
-    info.update(method=best, score=round(scores[best], 3), scale=round(scale, 3), rotation_deg=round(rot, 2))
+    info.update(method=best, score=round(scores[best], 3), scale=round(scale, 3), rotation_deg=round(rot, 2),
+                candidates={k: round(v, 3) for k, v in scores.items()})
     if scores[best] < MIN_SCORE:
         return None, {**info, "reason": "weak_alignment"}
     if not 0.25 < scale < 6 or abs(rot) > 6:

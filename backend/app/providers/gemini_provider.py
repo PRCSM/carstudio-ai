@@ -42,6 +42,68 @@ def supports_image_size(model: str) -> bool:
     return not model.startswith(("gemini-2.", "gemini-2-"))
 
 
+def _ratio(r: str) -> float:
+    a, b = (int(x) for x in r.split(":"))
+    return a / b
+
+
+def pad_to_aspect(jpeg: bytes, target: str) -> tuple[bytes, tuple[float, float, float, float] | None]:
+    """Pad the photo to the aspect ratio we request, so the model doesn't recompose the shot to fill a
+    different frame. The padding is a blurred mirror of the edge (the model replaces it with studio).
+    Returns (image, (top, bottom, left, right) as fractions of the padded size) or (jpeg, None)."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    img = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
+    h, w = img.shape[:2]
+    tr = _ratio(target)
+    if abs(math.log((w / h) / tr)) < 0.02:
+        return jpeg, None
+    if w / h > tr:      # too wide: add rows
+        extra = round(w / tr) - h
+        top, bottom, left, right = extra // 2, extra - extra // 2, 0, 0
+    else:               # too tall: add columns
+        extra = round(h * tr) - w
+        top, bottom, left, right = 0, 0, extra // 2, extra - extra // 2
+    padded = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_REFLECT_101)
+    blur = cv2.GaussianBlur(padded, (0, 0), max(4.0, 0.02 * max(padded.shape[:2])))
+    keep = np.zeros(padded.shape[:2], np.float32)
+    keep[top:top + h, left:left + w] = 1.0
+    keep = cv2.GaussianBlur(keep, (0, 0), 3.0)[..., None]
+    out = (padded * keep + blur * (1 - keep)).astype(np.uint8)
+    ph, pw = out.shape[:2]
+    buf = io.BytesIO()
+    Image.fromarray(out).save(buf, format="JPEG", quality=95)
+    return buf.getvalue(), (top / ph, bottom / ph, left / pw, right / pw)
+
+
+def crop_fractions(image: bytes, frac: tuple[float, float, float, float], ratio: float | None = None) -> bytes:
+    """Remove the padding again. `ratio` (w/h of the original) makes the crop exact even when the model's
+    frame is not precisely the requested ratio (2K '16:9' is 2752x1536)."""
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(image)).convert("RGB")
+    w, h = im.size
+    top, bottom, left, right = frac
+    x0, y0, x1, y1 = round(left * w), round(top * h), w - round(right * w), h - round(bottom * h)
+    if ratio:
+        if top or bottom:   # padded vertically: keep full width, fix the height
+            ch = min(h, round((x1 - x0) / ratio))
+            cy = (y0 + y1) / 2
+            y0 = int(max(0, min(h - ch, round(cy - ch / 2))))
+            y1 = y0 + ch
+        else:
+            cw = min(w, round((y1 - y0) * ratio))
+            cx = (x0 + x1) / 2
+            x0 = int(max(0, min(w - cw, round(cx - cw / 2))))
+            x1 = x0 + cw
+    box = (x0, y0, x1, y1)
+    buf = io.BytesIO()
+    im.crop(box).save(buf, format="JPEG", quality=95, subsampling=0)
+    return buf.getvalue()
+
+
 def _image_dims(jpeg: bytes) -> tuple[int, int]:
     try:
         from PIL import Image
@@ -84,11 +146,14 @@ class GeminiImage:
     def is_configured(self) -> bool:
         return bool(self.api_key) and bool(self.models)
 
-    def _body(self, req: EditRequest, model: str, *, with_image_config: bool) -> dict:
+    def _body(self, req: EditRequest, model: str, *, with_image_config: bool,
+              image: bytes | None = None, aspect: str | None = None) -> dict:
         gen: dict = {"responseModalities": ["IMAGE"]}
         if with_image_config:
-            w, h = _image_dims(req.image)
-            cfg = {"aspectRatio": nearest_aspect(w or req.width, h or req.height)}
+            if aspect is None:
+                w, h = _image_dims(req.image)
+                aspect = nearest_aspect(w or req.width, h or req.height)
+            cfg = {"aspectRatio": aspect}
             if self.image_size and supports_image_size(model):
                 cfg["imageSize"] = self.image_size
             gen["imageConfig"] = cfg
@@ -96,7 +161,7 @@ class GeminiImage:
             "contents": [{"role": "user", "parts": [
                 {"text": req.prompt},
                 *[{"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}}
-                  for img in (req.image, *req.extra_images)],
+                  for img in (image or req.image, *req.extra_images)],
             ]}],
             "generationConfig": gen,
         }
@@ -113,23 +178,34 @@ class GeminiImage:
 
     def edit(self, req: EditRequest) -> EditResult:
         candidates = [self._working] if self._working else list(self.models)
+        w, h = _image_dims(req.image)
+        aspect = nearest_aspect(w or req.width, h or req.height)
+        padded, frac = req.image, None
+        if not req.novel_view and w and h:
+            # same-angle edit: keep the customer's framing exactly (pad -> generate -> crop back)
+            padded, frac = pad_to_aspect(req.image, aspect)
         last_404 = None
         for model in candidates:
             with_cfg = True
-            r = self._post(model, self._body(req, model, with_image_config=True))
+            r = self._post(model, self._body(req, model, with_image_config=True, image=padded, aspect=aspect))
             text = r.text.lower()
             if r.status_code == 400 and any(k in text for k in ("imageconfig", "image_config", "imagesize",
                                                                "image_size", "aspect")):
                 log.warning("%s rejected imageConfig; retrying without it", model)
                 with_cfg = False
-                r = self._post(model, self._body(req, model, with_image_config=False))
+                r = self._post(model, self._body(req, model, with_image_config=False, image=padded))
                 text = r.text.lower()
             if r.status_code == 404:
                 log.warning("image model %s not available on %s; trying next", model, self.name)
                 last_404 = model
                 continue
             self._working = model
-            return self._parse(r, text, model, with_cfg)
+            res = self._parse(r, text, model, with_cfg)
+            if frac is not None:
+                res.image = crop_fractions(res.image, frac, ratio=w / h)
+                res.meta["padded_to"] = aspect
+                res.meta["final_size"] = list(_image_dims(res.image))
+            return res
         raise CreditExhausted(f"no image model available (last 404: {last_404})")
 
     def _parse(self, r: httpx.Response, text: str, model: str, with_cfg: bool) -> EditResult:
